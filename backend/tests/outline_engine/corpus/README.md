@@ -20,6 +20,9 @@ validacion estructural esta en `../test_corpus.py`.
 | `no_embebida.pdf` | Fuente NO incrustada (Helvetica base-14). Caso duro -> fallback (fase 3). |
 | `type3.pdf` | Fuente Type3 (glifos dibujados con operadores). Caso duro -> fallback (fase 3). |
 | `remapped.pdf` | TrueType con `/Encoding /Differences` que remapea bytes 0x01..0x04 -> H,o,l,a: **charcode != unicode**. Prueba que la extraccion por unicode (`FPDFText_GetUnicode` -> `get_glyph_outline`) es robusta (el arg de `FPDFFont_GetGlyphPath` es el unicode, no el charcode). |
+| `xobject_text.pdf` | Texto DENTRO de un Form XObject (via `Do`). El motor lo aplana (textpage), neutraliza el texto del XObject y lo outlinea a nivel de pagina. |
+| `cid.pdf` | Fuente CID Type0 Identity-H (CIDFontType2) CON ToUnicode -> se outlinea por unicode. |
+| `cid_no_unicode.pdf` | CID Type0 Identity-H SIN ToUnicode: el "unicode" del textpage es el GID (no fiable). El self-check por-glifo detecta el desajuste -> **fallback** (evita corrupcion silenciosa). |
 
 ## Fuentes vendorizadas (`_fonts/`)
 

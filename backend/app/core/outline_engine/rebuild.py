@@ -149,6 +149,78 @@ def page_has_xobject_text(page: pikepdf.Page) -> bool:
     return False
 
 
+def _strip_text_bytes(source) -> bytes:
+    """Contenido de un stream (page o form) sin bloques BT...ET."""
+    kept = []
+    depth = 0
+    for operands, operator in pikepdf.parse_content_stream(source):
+        op = str(operator)
+        if op == "BT":
+            depth += 1
+            continue
+        if op == "ET":
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0:
+            kept.append((operands, operator))
+    return pikepdf.unparse_content_stream(kept)
+
+
+def _copy_form_stripped(pdf: pikepdf.Pdf, form, depth: int = 0):
+    """COPIA privada de un Form XObject con el texto quitado (recursivo) y sin
+    fuentes. No muta el original (que puede estar compartido)."""
+    new_form = pdf.make_stream(_strip_text_bytes(form))
+    for key in list(form.keys()):
+        if key in ("/Length", "/Filter", "/DecodeParms"):
+            continue
+        new_form[key] = form[key]
+    res = form.get("/Resources")
+    if res is not None:
+        new_res = pikepdf.Dictionary()
+        for key in res.keys():
+            new_res[key] = res[key]
+        if "/Font" in new_res:
+            del new_res.Font
+        if "/XObject" in new_res:
+            new_xo = pikepdf.Dictionary()
+            for xk, xo in dict(new_res.XObject).items():
+                if xo.get("/Subtype") == Name("/Form") and _form_has_text(xo, depth + 1):
+                    new_xo[xk] = pdf.make_indirect(_copy_form_stripped(pdf, xo, depth + 1))
+                else:
+                    new_xo[xk] = xo
+            new_res.XObject = new_xo
+        new_form.Resources = new_res
+    return new_form
+
+
+def neutralize_xobject_text(pdf: pikepdf.Pdf, page: pikepdf.Page) -> List[str]:
+    """Sustituye los Form XObjects con texto por copias privadas sin texto/fuentes.
+
+    Permite outlinear paginas cuyo texto vive en XObjects: los glifos ya se emiten
+    a nivel de pagina (la textpage los aplana en coords de pagina); esto elimina el
+    texto original del XObject para que no se pinte doble ni queden fuentes.
+    Devuelve nombres de fuentes eliminadas de los forms (best-effort). Lanza si algo
+    va mal -> el llamador debe hacer fallback.
+    """
+    removed: List[str] = []
+    res = page.get("/Resources")
+    if res is None or "/XObject" not in res:
+        return removed
+    xobjs = res.XObject
+    for key in list(dict(xobjs).keys()):
+        xo = xobjs[key]
+        if xo.get("/Subtype") == Name("/Form") and _form_has_text(xo):
+            fr = xo.get("/Resources")
+            if fr is not None and "/Font" in fr:
+                for fk, fo in dict(fr.Font).items():
+                    try:
+                        removed.append(str(fo.get("/BaseFont") or fk))
+                    except Exception:
+                        removed.append(str(fk))
+            xobjs[key] = pdf.make_indirect(_copy_form_stripped(pdf, xo))
+    return removed
+
+
 def page_type3_font_names(page: pikepdf.Page) -> List[str]:
     """Nombres de fuentes Type3 referenciadas a nivel de pagina (caso duro)."""
     out: List[str] = []

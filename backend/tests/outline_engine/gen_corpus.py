@@ -424,6 +424,23 @@ def _build_cid(text, with_tounicode):
     return _save_det(pdf)
 
 
+def gen_xobject_text():
+    """Texto DENTRO de un Form XObject (via Do). El motor lo aplana, neutraliza el
+    texto del XObject y lo outlinea a nivel de pagina."""
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(320, 160))
+    font, _ = _embed_simple_font(pdf, DEJAVU, "Texto en Form XObject 123", is_cff=False)
+    form = pikepdf.Stream(
+        pdf, b"BT /F1 22 Tf 20 90 Td (Texto en Form) Tj 0 -34 Td (XObject 123) Tj ET")
+    form.Type = Name("/XObject")
+    form.Subtype = Name("/Form")
+    form.BBox = Array([0, 0, 320, 160])
+    form.Resources = Dictionary(Font=Dictionary(F1=font))
+    page.Resources = Dictionary(XObject=Dictionary(Fm=pdf.make_indirect(form)))
+    page.Contents = pdf.make_stream(b"q 1 0 0 1 0 0 cm /Fm Do Q")
+    return _save_det(pdf)
+
+
 def gen_cid():
     """CID Type0 Identity-H CON ToUnicode -> outlineable por unicode."""
     return _build_cid("CID Type0 Identity 123", with_tounicode=True)
@@ -445,6 +462,7 @@ GENERATORS = {
     "no_embebida.pdf": gen_no_embebida,
     "type3.pdf": gen_type3,
     "remapped.pdf": gen_remapped,
+    "xobject_text.pdf": gen_xobject_text,
     "cid.pdf": gen_cid,
     "cid_no_unicode.pdf": gen_cid_no_unicode,
 }

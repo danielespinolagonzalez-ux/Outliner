@@ -25,6 +25,7 @@ from .errors import CorruptPdfError, EncryptedPdfError, UnsupportedContentError
 from .glyphs import PageGlyphAnalysis, analyze_page_glyphs
 from .fallback import DEFAULT_DPI, rasterize_page
 from .rebuild import (
+    neutralize_xobject_text,
     page_has_xobject_text,
     page_type3_font_names,
     rebuild_page,
@@ -98,9 +99,24 @@ def _page_reasons(analysis: PageGlyphAnalysis, page: pikepdf.Page) -> List[str]:
     type3 = page_type3_font_names(page)
     if type3:
         reasons.append("fuente Type3: " + ", ".join(type3))
-    if page_has_xobject_text(page):
-        reasons.append("texto dentro de Form XObject (anidado)")
+    # OJO: el texto en Form XObject NO es motivo de fallback: la textpage lo aplana
+    # y analyze_page_glyphs ya valida sus glifos; se neutraliza en el rebuild. Si su
+    # texto fuese no convertible (Type3/CID en XObject), ya lo captan las senales de
+    # arriba (unoutlineable_inked / non_fill_visible sobre el texto aplanado).
     return reasons
+
+
+def _fallback_page(pdf, page, pdf_bytes, index, opts, report, reason):
+    """Aplica el fallback elegido a una pagina y anota el report."""
+    if opts.fallback == FALLBACK_ERROR:
+        raise UnsupportedContentError(index, reason)
+    if opts.fallback == FALLBACK_SKIP:
+        report.add(PageReport(index=index, outlined=False,
+                              fallback="skip", reason=reason))
+        return
+    rasterize_page(pdf, page, pdf_bytes, index, opts.raster_dpi)
+    report.add(PageReport(index=index, outlined=False,
+                          fallback="raster", reason=reason))
 
 
 def outline_pdf(data: Union[bytes, bytearray, str, os.PathLike],
@@ -129,7 +145,16 @@ def outline_pdf(data: Union[bytes, bytearray, str, os.PathLike],
                     # sin texto: pagina intacta (fuentes no usadas se limpian al final)
                     report.add(PageReport(index=i, outlined=False))
                     continue
-                removed = rebuild_page(pdf, page, analysis.glyphs)
+                # neutralizar texto en Form XObjects (si lo hay) antes de emitir
+                xobj_removed = []
+                if page_has_xobject_text(page):
+                    try:
+                        xobj_removed = neutralize_xobject_text(pdf, page)
+                    except Exception as exc:  # no neutralizable -> fallback seguro
+                        _fallback_page(pdf, page, pdf_bytes, i, opts, report,
+                                       "texto en Form XObject no neutralizable: %s" % exc)
+                        continue
+                removed = rebuild_page(pdf, page, analysis.glyphs) + xobj_removed
                 page_report = PageReport(
                     index=i, outlined=True,
                     outlined_glyphs=len(analysis.glyphs), removed_fonts=removed)
@@ -140,17 +165,7 @@ def outline_pdf(data: Union[bytes, bytearray, str, os.PathLike],
                 report.add(page_report)
                 continue
 
-            reason = "; ".join(reasons)
-            if opts.fallback == FALLBACK_ERROR:
-                raise UnsupportedContentError(i, reason)
-            if opts.fallback == FALLBACK_SKIP:
-                report.add(PageReport(index=i, outlined=False,
-                                      fallback="skip", reason=reason))
-                continue
-            # raster
-            rasterize_page(pdf, page, pdf_bytes, i, opts.raster_dpi)
-            report.add(PageReport(index=i, outlined=False,
-                                  fallback="raster", reason=reason))
+            _fallback_page(pdf, page, pdf_bytes, i, opts, report, "; ".join(reasons))
 
         pdf.remove_unreferenced_resources()
         out = io.BytesIO()

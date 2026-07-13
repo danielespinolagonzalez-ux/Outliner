@@ -31,7 +31,7 @@ FALLBACK_DIFF_THRESHOLD = 0.015  # raster (JPEG) es con perdida -> mas holgado
 OUTLINEABLE = [
     "latino_ttf.pdf", "latino_cff.pdf", "subset.pdf", "multipos.pdf",
     "color_cmyk.pdf", "mixto.pdf", "no_embebida.pdf", "remapped.pdf",
-    "cid.pdf",
+    "cid.pdf", "xobject_text.pdf",
 ]
 FALLBACK_CASES = ["type3.pdf", "cid_no_unicode.pdf"]
 
