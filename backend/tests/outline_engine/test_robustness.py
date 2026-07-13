@@ -157,3 +157,31 @@ def test_stroke_text_falls_back():
     assert pr.fallback == "raster"
     assert "no-fill" in pr.reason
     assert _fonts(result.pdf_bytes) == 0
+
+
+# ------------------------- casos borde -------------------------
+def test_blank_page_passthrough():
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(200, 200))
+    out = io.BytesIO()
+    pdf.save(out)
+    pdf.close()
+    result = outline_pdf(out.getvalue(), OutlineOpts())
+    assert result.report.pages[0].outlined is False
+    assert not result.report.pages[0].fallback
+
+
+def test_path_input(tmp_path):
+    src = _text_pdf([["desde fichero"]])
+    p = tmp_path / "in.pdf"
+    p.write_bytes(src)
+    result = outline_pdf(str(p), OutlineOpts())
+    assert result.report.pages[0].outlined is True
+    assert _fonts(result.pdf_bytes) == 0
+
+
+def test_report_json_serializable():
+    import json
+    result = outline_pdf(_text_pdf([["hola"]]), OutlineOpts())
+    # el report debe serializar a JSON (lo que devuelve el endpoint)
+    json.dumps(result.report.to_dict())
