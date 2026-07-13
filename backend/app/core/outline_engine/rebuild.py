@@ -57,21 +57,28 @@ def glyphs_to_ops(glyphs: List[PositionedGlyph]) -> bytes:
     return b"\n".join(glyph_to_ops(g) for g in glyphs)
 
 
-def strip_text(page: pikepdf.Page) -> bytes:
-    """Devuelve el contenido de la pagina sin ningun bloque BT...ET."""
+# Operadores de TEXTO (mostrado + estado de texto). Se quitan TODOS; el resto
+# (color rg/g/k, gs, cm, w, q/Q, path/imagen...) se conserva -> asi no se pierden
+# los efectos de estado grafico fijados DENTRO de un BT..ET, que en PDF persisten
+# tras ET (los objetos de texto no hacen save/restore del graphics state).
+_TEXT_OPS = frozenset({
+    "BT", "ET", "Tj", "TJ", "'", '"',
+    "Tf", "Td", "TD", "Tm", "T*", "Tc", "Tw", "Tz", "TL", "Tr", "Ts",
+})
+
+
+def _content_without_text(source) -> bytes:
     kept = []
-    depth = 0
-    for operands, operator in pikepdf.parse_content_stream(page):
-        op = str(operator)
-        if op == "BT":
-            depth += 1
+    for operands, operator in pikepdf.parse_content_stream(source):
+        if str(operator) in _TEXT_OPS:
             continue
-        if op == "ET":
-            depth = max(0, depth - 1)
-            continue
-        if depth == 0:
-            kept.append((operands, operator))
+        kept.append((operands, operator))
     return pikepdf.unparse_content_stream(kept)
+
+
+def strip_text(page: pikepdf.Page) -> bytes:
+    """Contenido de la pagina sin operadores de texto (conserva estado grafico)."""
+    return _content_without_text(page)
 
 
 def privatize_resources(page: pikepdf.Page) -> None:
@@ -118,12 +125,14 @@ def remove_page_fonts(page: pikepdf.Page) -> List[str]:
     return removed
 
 
-def page_has_annotation_text_fonts(page: pikepdf.Page) -> bool:
-    """True si alguna anotacion trae fuentes en su appearance stream (/AP).
+def page_has_annotation_text(page: pikepdf.Page) -> bool:
+    """True si alguna anotacion dibuja TEXTO en su appearance stream (/AP).
 
-    Ese texto/fuente NO esta en el content de la pagina: el outline no lo tocaria
-    y la fuente sobreviviria -> la pagina va a fallback (el raster lo hornea).
-    Las anotaciones sin apariencia con fuentes (p.ej. /Link) no cuentan.
+    Ese texto vive fuera del content de la pagina: el outline no lo tocaria y su
+    fuente sobreviviria (aunque la fuente se resuelva del /DR del AcroForm, o de
+    un Form XObject anidado en la apariencia) -> la pagina va a fallback (el
+    raster la hornea). Se detecta por el operador de texto (BT), recursivo, en vez
+    de por /Font directo. Las anotaciones sin texto (p.ej. /Link) no cuentan.
     """
     annots = page.get("/Annots")
     if not annots:
@@ -139,20 +148,37 @@ def page_has_annotation_text_fonts(page: pikepdf.Page) -> bool:
             stream = ap.get(state_key)
             if stream is None:
                 continue
-            # /N puede ser un stream o un subdiccionario de estados
+            # /N puede ser un stream (tiene /BBox) o un subdiccionario de estados
             candidates = [stream]
-            if "/Subtype" not in stream and hasattr(stream, "keys"):
+            if hasattr(stream, "keys") and "/BBox" not in stream:
                 try:
                     candidates = [stream[k] for k in stream.keys()]
                 except Exception:
                     candidates = [stream]
             for cand in candidates:
                 try:
-                    res = cand.get("/Resources")
+                    if _form_has_text(cand):
+                        return True
                 except Exception:
                     continue
-                if res is not None and "/Font" in res and len(dict(res.Font)) > 0:
-                    return True
+    return False
+
+
+def page_has_pattern_text(page: pikepdf.Page) -> bool:
+    """True si algun tiling Pattern (/PatternType 1) dibuja texto en su stream.
+
+    Ese texto (y su fuente en /Resources del pattern) no lo ve el aplanado de la
+    textpage ni el strip de la pagina -> sobreviviria. La pagina va a fallback.
+    """
+    res = page.get("/Resources")
+    if res is None or "/Pattern" not in res:
+        return False
+    for _k, pat in dict(res.Pattern).items():
+        try:
+            if int(pat.get("/PatternType", 0)) == 1 and _form_has_text(pat):
+                return True
+        except Exception:
+            continue
     return False
 
 
@@ -188,7 +214,9 @@ def _content_has_text_op(source) -> bool:
 
 def _form_has_text(form, depth: int = 0) -> bool:
     if depth > 12:
-        return False
+        # tope de recursion: en vez de asumir "sin texto" (arriesga aplanado sin
+        # neutralizar / fuente residual), asumir que SI podria haber -> fallback.
+        return True
     if _content_has_text_op(form):
         return True
     res = form.get("/Resources")
@@ -214,27 +242,10 @@ def page_has_xobject_text(page: pikepdf.Page) -> bool:
     return False
 
 
-def _strip_text_bytes(source) -> bytes:
-    """Contenido de un stream (page o form) sin bloques BT...ET."""
-    kept = []
-    depth = 0
-    for operands, operator in pikepdf.parse_content_stream(source):
-        op = str(operator)
-        if op == "BT":
-            depth += 1
-            continue
-        if op == "ET":
-            depth = max(0, depth - 1)
-            continue
-        if depth == 0:
-            kept.append((operands, operator))
-    return pikepdf.unparse_content_stream(kept)
-
-
 def _copy_form_stripped(pdf: pikepdf.Pdf, form, depth: int = 0):
     """COPIA privada de un Form XObject con el texto quitado (recursivo) y sin
     fuentes. No muta el original (que puede estar compartido)."""
-    new_form = pdf.make_stream(_strip_text_bytes(form))
+    new_form = pdf.make_stream(_content_without_text(form))
     for key in list(form.keys()):
         if key in ("/Length", "/Filter", "/DecodeParms"):
             continue

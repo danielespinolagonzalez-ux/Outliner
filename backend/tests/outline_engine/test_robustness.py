@@ -308,3 +308,100 @@ def test_render_verification_no_false_fallback_on_correct_pages():
     with_verify = outline_pdf(data, OutlineOpts(verify_render=True))
     assert with_verify.report.pages[0].outlined is True
     assert with_verify.report.pages[0].fallback == ""
+
+
+# ------------------------- hallazgos de la revision FINAL -------------------------
+def test_color_set_inside_bt_persists():
+    """strip_text solo quita operadores de TEXTO; el color fijado dentro de BT..ET
+    (que en PDF persiste tras ET) debe conservarse -> el rectangulo sigue rojo."""
+    import sys
+    sys.path.insert(0, "backend/tests/outline_engine")
+    import gen_corpus
+    from pikepdf import Dictionary
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(200, 120))
+    font, _ = gen_corpus._embed_simple_font(pdf, gen_corpus.DEJAVU, "Hi", is_cff=False)
+    page.Resources = Dictionary(Font=Dictionary(F1=font))
+    page.Contents = pdf.make_stream(
+        b"q BT 1 0 0 rg /F1 20 Tf 10 90 Td (Hi) Tj ET 10 20 180 30 re f Q")
+    out = io.BytesIO(); pdf.save(out); pdf.close()
+    result = outline_pdf(out.getvalue(), OutlineOpts())
+    doc = pdfium.PdfDocument(result.pdf_bytes)
+    arr = np.asarray(doc[0].render(scale=2).to_pil().convert("RGB"))
+    doc.close()
+    r, g, b = arr[180, 200]  # centro del rectangulo
+    assert (int(r), int(g), int(b)) == (255, 0, 0), "el rectangulo perdio el color rojo"
+
+
+def test_verify_failure_skip_reverts_not_raster():
+    """fallback='skip' + fallo de verificacion -> revertir al original, NO rasterizar."""
+    data = _build_cid_rotated_no_tounicode()
+    result = outline_pdf(data, OutlineOpts(fallback="skip"))
+    pr = result.report.pages[0]
+    assert pr.fallback == "skip", "skip no debe rasterizar aunque falle la verificacion"
+    assert not pr.outlined
+
+
+def test_annotation_dr_font_removed():
+    """Fuente de anotacion resuelta del AcroForm /DR: fallback + AcroForm eliminado
+    -> cero fuentes incrustadas en la salida."""
+    import sys
+    sys.path.insert(0, "backend/tests/outline_engine")
+    import gen_corpus
+    from pikepdf import Name, Dictionary, Array
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(300, 150))
+    drfont, _ = gen_corpus._embed_simple_font(pdf, gen_corpus.DEJAVU, "field value", is_cff=False)
+    pdf.Root.AcroForm = Dictionary(Fields=Array([]),
+                                   DR=pdf.make_indirect(Dictionary(Font=Dictionary(Helv=drfont))))
+    ap = pikepdf.Stream(pdf, b"BT /Helv 12 Tf 2 12 Td (field value) Tj ET")
+    ap.Type = Name("/XObject"); ap.Subtype = Name("/Form")
+    ap.BBox = Array([0, 0, 100, 20]); ap.Resources = Dictionary()
+    annot = pdf.make_indirect(Dictionary(
+        Type=Name("/Annot"), Subtype=Name("/Widget"), FT=Name("/Tx"),
+        Rect=Array([10, 100, 110, 120]), AP=Dictionary(N=pdf.make_indirect(ap))))
+    page.Annots = Array([annot]); page.Contents = pdf.make_stream(b"")
+    out = io.BytesIO(); pdf.save(out); pdf.close()
+    result = outline_pdf(out.getvalue(), OutlineOpts())
+    assert result.report.pages[0].fallback == "raster"
+    assert _fontfiles(result.pdf_bytes) == 0
+
+
+def test_pattern_text_falls_back():
+    """Texto dentro de un tiling Pattern -> deteccion -> fallback."""
+    import sys
+    sys.path.insert(0, "backend/tests/outline_engine")
+    import gen_corpus
+    from pikepdf import Name, Dictionary, Array
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(200, 120))
+    pfont, _ = gen_corpus._embed_simple_font(pdf, gen_corpus.DEJAVU, "Ptext", is_cff=False)
+    pat = pikepdf.Stream(pdf, b"BT /PF 10 Tf 2 2 Td (Ptext) Tj ET")
+    pat.Type = Name("/Pattern"); pat.PatternType = 1; pat.PaintType = 1; pat.TilingType = 1
+    pat.BBox = Array([0, 0, 50, 20]); pat.XStep = 50; pat.YStep = 20
+    pat.Resources = Dictionary(Font=Dictionary(PF=pfont))
+    page.Resources = Dictionary(Pattern=Dictionary(P1=pdf.make_indirect(pat)))
+    page.Contents = pdf.make_stream(b"/Pattern cs /P1 scn 10 10 180 100 re f")
+    out = io.BytesIO(); pdf.save(out); pdf.close()
+    result = outline_pdf(out.getvalue(), OutlineOpts())
+    assert result.report.pages[0].fallback == "raster"
+    assert "Pattern" in result.report.pages[0].reason
+
+
+def test_huge_page_verify_does_not_crash():
+    """Pagina enorme (verify OOM): NO debe convertir un outline valido en crash;
+    se entrega con warning de 'no verificado'."""
+    import sys
+    sys.path.insert(0, "backend/tests/outline_engine")
+    import gen_corpus
+    from pikepdf import Dictionary
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(14400, 14400))
+    font, _ = gen_corpus._embed_simple_font(pdf, gen_corpus.DEJAVU, "big", is_cff=False)
+    page.Resources = Dictionary(Font=Dictionary(F1=font))
+    page.Contents = pdf.make_stream(b"BT /F1 400 Tf 200 200 Td (big page) Tj ET")
+    out = io.BytesIO(); pdf.save(out); pdf.close()
+    result = outline_pdf(out.getvalue(), OutlineOpts())  # no debe lanzar
+    pr = result.report.pages[0]
+    assert pr.outlined is True
+    assert any("no se pudo verificar" in w for w in pr.warnings)

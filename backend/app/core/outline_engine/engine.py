@@ -27,7 +27,8 @@ from .glyphs import PageGlyphAnalysis, analyze_page_glyphs
 from .fallback import DEFAULT_DPI, rasterize_page
 from .rebuild import (
     neutralize_xobject_text,
-    page_has_annotation_text_fonts,
+    page_has_annotation_text,
+    page_has_pattern_text,
     page_has_xobject_text,
     page_type3_font_names,
     privatize_resources,
@@ -110,8 +111,10 @@ def _page_reasons(analysis: PageGlyphAnalysis, page: pikepdf.Page) -> List[str]:
     type3 = page_type3_font_names(page)
     if type3:
         reasons.append("fuente Type3: " + ", ".join(type3))
-    if page_has_annotation_text_fonts(page):
-        reasons.append("fuentes en apariencias de anotaciones (form/FreeText/stamp)")
+    if page_has_annotation_text(page):
+        reasons.append("texto en apariencias de anotaciones (form/FreeText/stamp)")
+    if page_has_pattern_text(page):
+        reasons.append("texto dentro de un tiling Pattern")
     # OJO: el texto en Form XObject NO es motivo de fallback: la textpage lo aplana
     # y analyze_page_glyphs ya valida sus glifos; se neutraliza en el rebuild. Si su
     # texto fuese no convertible (Type3/CID en XObject), ya lo captan las senales de
@@ -131,25 +134,73 @@ def _render_gray(doc, index, dpi):
     return np.asarray(pil, dtype=np.int16)
 
 
-def _verify_outlined_pages(orig_bytes, out_bytes, report, opts) -> List[int]:
-    """Devuelve los indices de paginas OUTLINEADAS cuyo render difiere del original
-    por encima de verify_threshold (o cambiaron de tamano). Bajo PDFIUM_LOCK."""
+def _verify_outlined_pages(orig_bytes, out_bytes, report, opts):
+    """Verifica por render las paginas OUTLINEADAS. Devuelve (failed, unverifiable):
+    - failed: el render de la salida difiere del original -> deben ir a fallback.
+    - unverifiable: no se pudo renderizar (p.ej. OOM en pagina enorme) -> se deja
+      el outline (ya producido) con un warning; NO se convierte un exito en crash.
+    Es defensiva: NINGUNA excepcion de render/apertura se propaga. Bajo PDFIUM_LOCK.
+    """
+    outlined = [pr.index for pr in report.pages if pr.outlined]
+    if not outlined:
+        return [], []
     failed: List[int] = []
+    unverifiable: List[int] = []
     with PDFIUM_LOCK:
-        odoc = pdfium.PdfDocument(orig_bytes, password=opts.password)
-        ndoc = pdfium.PdfDocument(out_bytes)
         try:
-            for pr in report.pages:
-                if not pr.outlined:
-                    continue
-                a = _render_gray(odoc, pr.index, opts.verify_dpi)
-                b = _render_gray(ndoc, pr.index, opts.verify_dpi)
-                if a.shape != b.shape or float(np.mean(np.abs(a - b) > 8)) > opts.verify_threshold:
-                    failed.append(pr.index)
+            odoc = pdfium.PdfDocument(orig_bytes, password=opts.password)
+        except Exception:
+            return [], outlined  # no se puede verificar nada -> todo unverifiable
+        try:
+            try:
+                ndoc = pdfium.PdfDocument(out_bytes)
+            except Exception:
+                return [], outlined
+            try:
+                for idx in outlined:
+                    try:
+                        a = _render_gray(odoc, idx, opts.verify_dpi)
+                        b = _render_gray(ndoc, idx, opts.verify_dpi)
+                    except Exception:
+                        unverifiable.append(idx)
+                        continue
+                    if a.shape != b.shape or float(np.mean(np.abs(a - b) > 8)) > opts.verify_threshold:
+                        failed.append(idx)
+            finally:
+                ndoc.close()
         finally:
             odoc.close()
-            ndoc.close()
-    return failed
+    return failed, unverifiable
+
+
+def _apply_verify_failures(pdf, orig_bytes, failed, report, opts):
+    """Manda a fallback las paginas que fallaron la verificacion por render,
+    RESPETANDO opts.fallback: 'skip' NO rasteriza (revierte la pagina al original);
+    'raster' rasteriza. (El caso 'error' se trata antes con raise.)"""
+    reason = "verificacion de render fallida (diff > %.1f%%)" % (opts.verify_threshold * 100)
+    orig_pdf = None
+    try:
+        for idx in failed:
+            pr = report.pages[idx]
+            if opts.fallback == FALLBACK_SKIP:
+                if orig_pdf is None:
+                    orig_pdf = pikepdf.open(io.BytesIO(orig_bytes),
+                                            password=opts.password or "")
+                pdf.pages[idx] = orig_pdf.pages[idx]  # revertir al original (copia foranea)
+                pr.fallback = "skip"
+                pr.reason = reason + ": pagina dejada como el original (skip)"
+            else:
+                rasterize_page(pdf, pdf.pages[idx], orig_bytes, idx,
+                               opts.raster_dpi, password=opts.password)
+                pr.fallback = "raster"
+                pr.reason = reason + ": rasterizado para no arriesgar corrupcion"
+            pr.outlined = False
+            pr.outlined_glyphs = 0
+            pr.removed_fonts = []
+            pr.warnings = []
+    finally:
+        if orig_pdf is not None:
+            orig_pdf.close()
 
 
 def _fallback_page(pdf, page, pdf_bytes, index, opts, report, reason):
@@ -223,29 +274,33 @@ def outline_pdf(data: Union[bytes, bytearray, str, os.PathLike],
 
             _fallback_page(pdf, page, pdf_bytes, i, opts, report, "; ".join(reasons))
 
+        # Si alguna pagina cayo a fallback por texto de anotaciones, esas fuentes
+        # se referencian desde /Root/AcroForm/DR (nivel documento) y sobrevivirian
+        # al rasterizado de la pagina. El raster ya horneo las apariencias -> se
+        # quita el AcroForm para que remove_unreferenced_resources borre esas fuentes.
+        if any("anotacion" in (p.reason or "") for p in report.pages):
+            try:
+                if "/AcroForm" in pdf.Root:
+                    del pdf.Root.AcroForm
+            except Exception:
+                pass
+
         pdf.remove_unreferenced_resources()
         out_bytes = _save_pdf(pdf)
 
-        # Red de seguridad: verificar por render y rasterizar las paginas que no casen.
+        # Red de seguridad: verificar por render y mandar a fallback las que no casen.
         if opts.verify_render and any(p.outlined for p in report.pages):
-            failed = set(_verify_outlined_pages(pdf_bytes, out_bytes, report, opts))
+            failed, unverifiable = _verify_outlined_pages(
+                pdf_bytes, out_bytes, report, opts)
+            for idx in unverifiable:
+                report.pages[idx].warnings.append(
+                    "no se pudo verificar por render (pagina enorme?): el outline "
+                    "se entrega SIN verificar")
             if failed:
                 if opts.fallback == FALLBACK_ERROR:
                     raise UnsupportedContentError(
                         sorted(failed)[0], "verificacion de render fallida")
-                for pr in report.pages:
-                    if pr.index not in failed:
-                        continue
-                    rasterize_page(pdf, pdf.pages[pr.index], pdf_bytes, pr.index,
-                                   opts.raster_dpi, password=opts.password)
-                    pr.outlined = False
-                    pr.outlined_glyphs = 0
-                    pr.removed_fonts = []
-                    pr.warnings = []
-                    pr.fallback = "raster"
-                    pr.reason = ("verificacion de render fallida (diff > %.1f%%): "
-                                 "rasterizado para no arriesgar corrupcion"
-                                 % (opts.verify_threshold * 100))
+                _apply_verify_failures(pdf, pdf_bytes, failed, report, opts)
                 pdf.remove_unreferenced_resources()
                 out_bytes = _save_pdf(pdf)
     finally:
