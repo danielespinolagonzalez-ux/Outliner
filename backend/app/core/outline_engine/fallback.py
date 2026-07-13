@@ -21,13 +21,13 @@ MIN_DPI = 300
 DEFAULT_DPI = 600
 
 
-def render_page_jpeg(pdf_bytes: bytes, page_index: int, dpi: int
-                     ) -> Tuple[bytes, int, int]:
+def render_page_jpeg(pdf_bytes: bytes, page_index: int, dpi: int,
+                     password=None) -> Tuple[bytes, int, int]:
     """Renderiza una pagina a JPEG. Devuelve (jpeg, px_w, px_h). Toma el lock."""
     dpi = max(MIN_DPI, int(dpi))
     scale = dpi / 72.0
     with PDFIUM_LOCK:
-        doc = pdfium.PdfDocument(pdf_bytes)
+        doc = pdfium.PdfDocument(pdf_bytes, password=password)
         try:
             page = doc[page_index]
             pil = page.render(scale=scale, draw_annots=True).to_pil().convert("RGB")
@@ -52,7 +52,8 @@ def _visual_size(page: pikepdf.Page) -> Tuple[float, float]:
 
 
 def rasterize_page(pdf: pikepdf.Pdf, page: pikepdf.Page,
-                   pdf_bytes: bytes, page_index: int, dpi: int) -> None:
+                   pdf_bytes: bytes, page_index: int, dpi: int,
+                   password=None) -> None:
     """Sustituye la pagina por su render raster (imagen a pagina completa).
 
     El tamano de salida es el VISUAL del original (misma caja) para no cambiar
@@ -60,7 +61,7 @@ def rasterize_page(pdf: pikepdf.Pdf, page: pikepdf.Page,
     (las anotaciones con apariencia quedan pintadas en la imagen).
     """
     pt_w, pt_h = _visual_size(page)
-    jpeg, px_w, px_h = render_page_jpeg(pdf_bytes, page_index, dpi)
+    jpeg, px_w, px_h = render_page_jpeg(pdf_bytes, page_index, dpi, password=password)
 
     img = pikepdf.Stream(pdf, jpeg)
     img.Type = Name("/XObject")

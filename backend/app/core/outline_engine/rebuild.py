@@ -74,8 +74,35 @@ def strip_text(page: pikepdf.Page) -> bytes:
     return pikepdf.unparse_content_stream(kept)
 
 
+def privatize_resources(page: pikepdf.Page) -> None:
+    """Da a la pagina una copia PRIVADA de /Resources (y de sus sub-dicts /Font y
+    /XObject) para poder mutarla sin afectar recursos compartidos/indirectos de
+    OTRAS paginas. Si /Resources es heredado (None a nivel de pagina), no se hace
+    nada: las fuentes que queden sin referencia se limpian con
+    remove_unreferenced_resources al final.
+    """
+    res = page.get("/Resources")
+    if res is None:
+        return
+    new_res = pikepdf.Dictionary()
+    for key in res.keys():
+        value = res[key]
+        if key in ("/Font", "/XObject") and value is not None:
+            sub = pikepdf.Dictionary()
+            for sk in value.keys():
+                sub[sk] = value[sk]
+            new_res[key] = sub
+        else:
+            new_res[key] = value
+    page.Resources = new_res
+
+
 def remove_page_fonts(page: pikepdf.Page) -> List[str]:
-    """Quita /Font de /Resources de la pagina. Devuelve nombres base quitados."""
+    """Quita /Font de /Resources de la pagina. Devuelve nombres base quitados.
+
+    Presupone que /Resources ya es privada (ver privatize_resources); asi `del
+    res.Font` no afecta a paginas que comparten el mismo objeto.
+    """
     removed: List[str] = []
     res = page.get("/Resources")
     if res is None or "/Font" not in res:
@@ -89,6 +116,44 @@ def remove_page_fonts(page: pikepdf.Page) -> List[str]:
             removed.append(str(key))
     del res.Font
     return removed
+
+
+def page_has_annotation_text_fonts(page: pikepdf.Page) -> bool:
+    """True si alguna anotacion trae fuentes en su appearance stream (/AP).
+
+    Ese texto/fuente NO esta en el content de la pagina: el outline no lo tocaria
+    y la fuente sobreviviria -> la pagina va a fallback (el raster lo hornea).
+    Las anotaciones sin apariencia con fuentes (p.ej. /Link) no cuentan.
+    """
+    annots = page.get("/Annots")
+    if not annots:
+        return False
+    for annot in annots:
+        try:
+            ap = annot.get("/AP")
+        except Exception:
+            continue
+        if ap is None:
+            continue
+        for state_key in ("/N", "/D", "/R"):
+            stream = ap.get(state_key)
+            if stream is None:
+                continue
+            # /N puede ser un stream o un subdiccionario de estados
+            candidates = [stream]
+            if "/Subtype" not in stream and hasattr(stream, "keys"):
+                try:
+                    candidates = [stream[k] for k in stream.keys()]
+                except Exception:
+                    candidates = [stream]
+            for cand in candidates:
+                try:
+                    res = cand.get("/Resources")
+                except Exception:
+                    continue
+                if res is not None and "/Font" in res and len(dict(res.Font)) > 0:
+                    return True
+    return False
 
 
 def rebuild_page(pdf: pikepdf.Pdf, page: pikepdf.Page,

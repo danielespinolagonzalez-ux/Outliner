@@ -291,6 +291,12 @@ def _is_axis_aligned(m: Matrix) -> bool:
     return abs(m.b) < 1e-6 and abs(m.c) < 1e-6
 
 
+def _safe_chr(codepoint: int) -> str:
+    """chr() defensivo: FPDFText_GetUnicode puede devolver 0 (sin unicode) o un
+    valor > 0x10FFFF (ToUnicode malformado) que romperia chr()."""
+    return chr(codepoint) if 0 < codepoint <= 0x10FFFF else ""
+
+
 def placement_bbox(glyph: "PositionedGlyph") -> Tuple[float, float, float, float]:
     """BBox en pagina del glifo ya colocado (minx, miny, maxx, maxy)."""
     pts: List[Point] = []
@@ -317,7 +323,7 @@ def _build_positioned_glyph(textpage, i, obj, font, codepoint, render_mode,
     return PositionedGlyph(
         text_index=i,
         codepoint=codepoint,
-        char=chr(codepoint) if codepoint else "",
+        char=_safe_chr(codepoint),
         subpaths=subpaths,
         placement=placement,
         fill_rgb=(r.value, g.value, b.value),
@@ -406,10 +412,14 @@ def analyze_page_glyphs(page_handle, textpage,
         font = pdfium_c.FPDFTextObj_GetFont(obj)
         subpaths = get_glyph_outline(font, codepoint, 1.0)
         if not subpaths:
-            # whitespace legitimamente sin contorno; OJO: la caja de un espacio
-            # ROTADO tiene alto no-nulo (bbox axis-aligned), por eso se excluye por
-            # isspace, no por el tamano de la caja.
-            if codepoint and not chr(codepoint).isspace():
+            # OJO codepoint==0: sin unicode (CID/simbolica sin cmap). NO es
+            # whitespace -> si tiene tinta cuenta como no convertible (antes se
+            # colaba en silencio -> perdida de texto). El espacio legitimo se
+            # excluye por isspace; la caja de un espacio ROTADO tiene alto no-nulo,
+            # por eso se filtra por isspace y no por el tamano de la caja.
+            char = _safe_chr(codepoint)
+            is_whitespace = bool(char) and char.isspace()
+            if not is_whitespace:
                 w, h = _char_ink_dims(textpage, i)
                 if w > 0.1 and h > 0.1:
                     unoutlineable += 1  # tinta real que no pudimos convertir
