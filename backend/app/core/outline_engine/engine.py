@@ -112,7 +112,7 @@ def outline_pdf(data: Union[bytes, bytearray, str, os.PathLike],
 
     report = OutlineReport(engine="internal")
     try:
-        pdf = pikepdf.open(io.BytesIO(pdf_bytes))
+        pdf = pikepdf.open(io.BytesIO(pdf_bytes), password=opts.password or "")
     except pikepdf.PasswordError as exc:
         raise EncryptedPdfError(str(exc)) from exc
     except Exception as exc:  # pikepdf.PdfError y afines
