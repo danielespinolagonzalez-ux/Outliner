@@ -300,6 +300,27 @@ def placement_bbox(glyph: "PositionedGlyph") -> Tuple[float, float, float, float
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def _build_positioned_glyph(textpage, i, obj, font, codepoint, render_mode,
+                            subpaths) -> "PositionedGlyph":
+    font_size = pdfium_c.FPDFText_GetFontSize(textpage, i)
+    ox, oy = _char_origin(textpage, i)
+    m = _char_matrix(textpage, i)
+    placement = glyph_to_page(Matrix(m.a, m.b, m.c, m.d, ox, oy), font_size)
+    r, g, b, a = (ctypes.c_uint() for _ in range(4))
+    pdfium_c.FPDFPageObj_GetFillColor(
+        obj, ctypes.byref(r), ctypes.byref(g), ctypes.byref(b), ctypes.byref(a))
+    return PositionedGlyph(
+        text_index=i,
+        codepoint=codepoint,
+        char=chr(codepoint) if codepoint else "",
+        subpaths=subpaths,
+        placement=placement,
+        fill_rgb=(r.value, g.value, b.value),
+        font_size=font_size,
+        render_mode=render_mode,
+    )
+
+
 def iter_positioned_glyphs(page_handle, textpage,
                            keep_invisible: bool = False
                            ) -> Iterator["PositionedGlyph"]:
@@ -308,7 +329,7 @@ def iter_positioned_glyphs(page_handle, textpage,
     Omite: chars generados por pdfium (\\r\\n entre objetos), texto invisible
     (modo 3, salvo keep_invisible), y glifos sin contorno (espacio, o unicode
     sin cmap -> esos ultimos deben ir a fallback, se detectan aparte con
-    get_glyph_outline vacio). El llamador mantiene el PDFIUM_LOCK y la page/doc
+    analyze_page_glyphs). El llamador mantiene el PDFIUM_LOCK y la page/doc
     vivas (no dejar que el helper PdfPage se recolecte: cierra la page nativa).
     """
     n = pdfium_c.FPDFText_CountChars(textpage)
@@ -326,21 +347,71 @@ def iter_positioned_glyphs(page_handle, textpage,
         subpaths = get_glyph_outline(font, codepoint, 1.0)
         if not subpaths:
             continue
-        font_size = pdfium_c.FPDFText_GetFontSize(textpage, i)
-        ox, oy = _char_origin(textpage, i)
-        m = _char_matrix(textpage, i)
-        placement = glyph_to_page(Matrix(m.a, m.b, m.c, m.d, ox, oy), font_size)
-        r, g, b, a = (ctypes.c_uint() for _ in range(4))
-        pdfium_c.FPDFPageObj_GetFillColor(
-            obj, ctypes.byref(r), ctypes.byref(g),
-            ctypes.byref(b), ctypes.byref(a))
-        yield PositionedGlyph(
-            text_index=i,
-            codepoint=codepoint,
-            char=chr(codepoint) if codepoint else "",
-            subpaths=subpaths,
-            placement=placement,
-            fill_rgb=(r.value, g.value, b.value),
-            font_size=font_size,
-            render_mode=render_mode,
-        )
+        yield _build_positioned_glyph(
+            textpage, i, obj, font, codepoint, render_mode, subpaths)
+
+
+class PageGlyphAnalysis(NamedTuple):
+    """Resultado de analizar el texto de una pagina para decidir outlineabilidad."""
+
+    glyphs: List["PositionedGlyph"]   # emitibles (fill, con contorno)
+    unoutlineable_inked: int          # fill + con ink box pero GetGlyphPath vacio
+                                      # (Type3, CID sin cmap...) -> senal de fallback
+    non_fill_visible: int             # glifos visibles NO en modo fill (stroke/clip)
+    real_chars: int                   # chars no-generados considerados
+    non_embedded_fonts: List[str]     # fuentes no incrustadas usadas (-> warning)
+
+
+def _char_ink_dims(textpage, i) -> Tuple[float, float]:
+    box = char_box(textpage, i)  # (minx, miny, maxx, maxy)
+    return (box[2] - box[0], box[3] - box[1])
+
+
+def analyze_page_glyphs(page_handle, textpage,
+                        keep_invisible: bool = False) -> "PageGlyphAnalysis":
+    """Analiza el texto de la pagina: glifos emitibles + senales de fallback.
+
+    Un glifo cuenta como `unoutlineable_inked` si esta en modo fill, tiene caja de
+    tinta no trivial (ancho y alto > 0.1 pt) pero GetGlyphPath devuelve vacio: es
+    texto real que NO podemos convertir (Type3, fuente sin cmap Unicode) -> la
+    pagina debe ir a fallback. Los espacios (caja degenerada) NO cuentan.
+    El llamador mantiene el PDFIUM_LOCK y la page viva.
+    """
+    glyphs: List["PositionedGlyph"] = []
+    unoutlineable = 0
+    non_fill = 0
+    real = 0
+    non_embedded = set()
+    n = pdfium_c.FPDFText_CountChars(textpage)
+    for i in range(n):
+        if pdfium_c.FPDFText_IsGenerated(textpage, i) == 1:
+            continue
+        obj = pdfium_c.FPDFText_GetTextObject(textpage, i)
+        if not obj:
+            continue
+        real += 1
+        render_mode = pdfium_c.FPDFTextObj_GetTextRenderMode(obj)
+        invisible = is_invisible(render_mode)
+        if invisible and not keep_invisible:
+            continue
+        if not invisible and render_mode != pdfium_c.FPDF_TEXTRENDERMODE_FILL:
+            non_fill += 1  # stroke/fill+stroke/clip visible: no lo sabemos outlinear
+            continue
+        codepoint = pdfium_c.FPDFText_GetUnicode(textpage, i)
+        font = pdfium_c.FPDFTextObj_GetFont(obj)
+        subpaths = get_glyph_outline(font, codepoint, 1.0)
+        if not subpaths:
+            # whitespace legitimamente sin contorno; OJO: la caja de un espacio
+            # ROTADO tiene alto no-nulo (bbox axis-aligned), por eso se excluye por
+            # isspace, no por el tamano de la caja.
+            if codepoint and not chr(codepoint).isspace():
+                w, h = _char_ink_dims(textpage, i)
+                if w > 0.1 and h > 0.1:
+                    unoutlineable += 1  # tinta real que no pudimos convertir
+            continue
+        if not pdfium_c.FPDFFont_GetIsEmbedded(font):
+            non_embedded.add(_font_base_name(font) or "(sin nombre)")
+        glyphs.append(_build_positioned_glyph(
+            textpage, i, obj, font, codepoint, render_mode, subpaths))
+    return PageGlyphAnalysis(glyphs, unoutlineable, non_fill, real,
+                             sorted(non_embedded))
