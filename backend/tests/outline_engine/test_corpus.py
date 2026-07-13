@@ -18,6 +18,7 @@ import pypdfium2.raw as raw
 EXPECTED = [
     "latino_ttf.pdf", "latino_cff.pdf", "subset.pdf", "multipos.pdf",
     "color_cmyk.pdf", "mixto.pdf", "no_embebida.pdf", "type3.pdf",
+    "remapped.pdf",
 ]
 
 
@@ -177,3 +178,16 @@ def test_no_embebida_has_no_fontfile(corpus):
 def test_type3_is_type3(corpus):
     subtypes = [str(fo.get("/Subtype")) for fo in _iter_fonts(corpus["type3.pdf"])]
     assert "/Type3" in subtypes, "type3.pdf no contiene una fuente Type3"
+
+
+def test_remapped_has_differences_encoding(corpus):
+    # charcode != unicode: fuente TrueType incrustada con /Encoding /Differences.
+    encs = []
+    keys = []
+    for fo in _iter_fonts(corpus["remapped.pdf"]):
+        keys += _embed_keys(fo)
+        enc = fo.get("/Encoding")
+        if enc is not None and "/Differences" in enc:
+            encs.append(enc)
+    assert "/FontFile2" in keys, "remapped no incrusta TrueType"
+    assert encs, "remapped no usa /Encoding /Differences (charcode != unicode)"

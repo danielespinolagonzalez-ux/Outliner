@@ -19,6 +19,7 @@ validacion estructural esta en `../test_corpus.py`.
 | `mixto.pdf` | Texto + imagen (bitmap) + vectores (rect/linea/circulo). Lo no-texto debe quedar intacto. |
 | `no_embebida.pdf` | Fuente NO incrustada (Helvetica base-14). Caso duro -> fallback (fase 3). |
 | `type3.pdf` | Fuente Type3 (glifos dibujados con operadores). Caso duro -> fallback (fase 3). |
+| `remapped.pdf` | TrueType con `/Encoding /Differences` que remapea bytes 0x01..0x04 -> H,o,l,a: **charcode != unicode**. Prueba que la extraccion por unicode (`FPDFText_GetUnicode` -> `get_glyph_outline`) es robusta (el arg de `FPDFFont_GetGlyphPath` es el unicode, no el charcode). |
 
 ## Fuentes vendorizadas (`_fonts/`)
 

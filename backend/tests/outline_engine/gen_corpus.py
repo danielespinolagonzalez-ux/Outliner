@@ -21,10 +21,23 @@ from pikepdf import Array, Dictionary, Name
 from fontTools.subset import Options, Subsetter
 from fontTools.ttLib import TTFont as FTFont
 
+import reportlab.rl_config
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
+
+# Corpus DETERMINISTA: sin timestamps ni IDs aleatorios, para que regenerar no
+# produzca diffs espurios. reportlab -> modo invariant; pikepdf -> save() con
+# deterministic_id=True (ver _save_det).
+reportlab.rl_config.invariant = 1
+
+
+def _save_det(pdf):
+    out = io.BytesIO()
+    pdf.save(out, deterministic_id=True)
+    pdf.close()
+    return out.getvalue()
 
 THIS_DIR = Path(__file__).resolve().parent
 CORPUS_DIR = THIS_DIR / "corpus"
@@ -55,7 +68,7 @@ def _embed_simple_font(pdf, font_path, sample_text, is_cff):
     Devuelve (font_obj_indirecto, psname). Da control total del encoding para
     poder emitir operadores TJ con codigos ASCII conocidos (multipos, cff).
     """
-    f = FTFont(str(font_path))
+    f = FTFont(str(font_path), recalcTimestamp=False)  # no timestamp -> determinista
     upm = f["head"].unitsPerEm
 
     opts = Options()
@@ -159,10 +172,7 @@ def gen_latino_cff():
     body = "BT /F1 26 Tf 30 130 Td ({0}) Tj 0 -40 Td ({1}) Tj ET".format(
         _pdf_escape(text1), _pdf_escape(text2))
     page.Contents = pdf.make_stream(body.encode("latin-1"))
-    out = io.BytesIO()
-    pdf.save(out)
-    pdf.close()
-    return out.getvalue()
+    return _save_det(pdf)
 
 
 def gen_subset():
@@ -200,10 +210,7 @@ def gen_multipos():
         "BT /F1 16 Tf 30 40 Td (Linea horizontal de control) Tj ET"
     )
     page.Contents = pdf.make_stream(body.encode("latin-1"))
-    out = io.BytesIO()
-    pdf.save(out)
-    pdf.close()
-    return out.getvalue()
+    return _save_det(pdf)
 
 
 def gen_color_cmyk():
@@ -296,10 +303,66 @@ def gen_type3():
     ))
     page.Resources = Dictionary(Font=Dictionary(T3=font))
     page.Contents = pdf.make_stream(b"BT /T3 48 Tf 40 60 Td (ABABAB) Tj ET")
-    out = io.BytesIO()
-    pdf.save(out)
-    pdf.close()
-    return out.getvalue()
+    return _save_det(pdf)
+
+
+def gen_remapped():
+    """Fuente simple con /Encoding /Differences que remapea el byte (charcode) a
+    codigos NO-ASCII, de modo que charcode != unicode. Verifica que la extraccion
+    por unicode (FPDFText_GetUnicode -> get_glyph_outline) es robusta: el
+    argumento de GetGlyphPath es el UNICODE, no el charcode del content stream.
+    Texto "Hola": bytes 0x01..0x04 -> glifos H, o, l, a.
+    """
+    text_chars = "Hola"
+    codes = list(range(1, len(text_chars) + 1))  # 1,2,3,4 (no ASCII)
+
+    f = FTFont(str(DEJAVU), recalcTimestamp=False)  # determinista
+    upm = f["head"].unitsPerEm
+    opts = Options()
+    opts.notdef_outline = True
+    opts.glyph_names = True  # conservar nombres para el /Differences
+    subsetter = Subsetter(options=opts)
+    subsetter.populate(unicodes=[ord(c) for c in text_chars])
+    subsetter.subset(f)
+    cmap = f.getBestCmap()
+    hmtx = f["hmtx"]
+    head = f["head"]
+    scale = 1000.0 / upm
+    gname = {c: cmap[ord(c)] for c in text_chars}
+
+    buf = io.BytesIO()
+    f.save(buf)
+    program = buf.getvalue()
+    widths = [round(hmtx[gname[c]][0] * scale) for c in text_chars]
+    f.close()
+
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(220, 100))
+    fontfile = pdf.make_stream(program)
+    fontfile.Length1 = len(program)
+    differences = []
+    for code, ch in zip(codes, text_chars):
+        differences += [code, Name("/" + gname[ch])]
+    encoding = Dictionary(Type=Name("/Encoding"), Differences=Array(differences))
+    descriptor = pdf.make_indirect(Dictionary(
+        Type=Name("/FontDescriptor"),
+        FontName=Name("/DejaVuSans"),
+        Flags=32,
+        FontBBox=Array([round(v * scale) for v in
+                        (head.xMin, head.yMin, head.xMax, head.yMax)]),
+        ItalicAngle=0, Ascent=759, Descent=-240, CapHeight=729, StemV=80,
+    ))
+    descriptor[Name("/FontFile2")] = pdf.make_indirect(fontfile)
+    font = pdf.make_indirect(Dictionary(
+        Type=Name("/Font"), Subtype=Name("/TrueType"), BaseFont=Name("/DejaVuSans"),
+        FirstChar=codes[0], LastChar=codes[-1], Widths=Array(widths),
+        Encoding=encoding, FontDescriptor=descriptor,
+    ))
+    page.Resources = Dictionary(Font=Dictionary(F1=font))
+    hexcodes = "".join("%02X" % c for c in codes)
+    page.Contents = pdf.make_stream(
+        ("BT /F1 40 Tf 20 40 Td <%s> Tj ET" % hexcodes).encode("latin-1"))
+    return _save_det(pdf)
 
 
 # nombre -> generador
@@ -312,6 +375,7 @@ GENERATORS = {
     "mixto.pdf": gen_mixto,
     "no_embebida.pdf": gen_no_embebida,
     "type3.pdf": gen_type3,
+    "remapped.pdf": gen_remapped,
 }
 
 

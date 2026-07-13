@@ -22,13 +22,19 @@ cp1252: comentarios/prints en ASCII, usar '->' en vez de flechas.
 #
 # Caso de prueba: una "H" en Helvetica 48pt colocada en (x=100, y=200) pt.
 #
-# 1) EL ARGUMENTO 'glyph' DE FPDFFont_GetGlyphPath ES EL CHARCODE (no el GID).
-#    Pasar el codigo de caracter que la fuente ve en el content stream (para la
-#    'H' ASCII simple -> 72) devuelve el contorno correcto (1 subpath con forma
-#    de H). pdfium resuelve charcode -> glyph-index internamente usando el
-#    encoding / CIDToGIDMap de la fuente. Pasar un GID crudo daria otro glifo.
-#    (Para fuentes CID el "charcode" es el codigo propio de la fuente; se
-#     re-valida en Fase 1 al enumerar los glifos por objeto de texto.)
+# 1) EL ARGUMENTO 'glyph' DE FPDFFont_GetGlyphPath ES EL CODEPOINT UNICODE
+#    (no el charcode del content stream ni el GID). pdfium lo resuelve via el
+#    cmap Unicode del PROGRAMA de fuente embebido -> GID -> contorno.
+#    - En Fase 0 parecia "charcode" porque para la 'H' con encoding estandar
+#      charcode == unicode == 72.
+#    - Verificado con corpus/remapped.pdf (fuente con /Encoding /Differences que
+#      remapea el byte 0x01 -> 'H'): GetGlyphPath(0x01) -> VACIO;
+#      GetGlyphPath(0x48 = unicode 'H') -> contorno correcto. O sea, NO usa el
+#      Encoding del PDF: usa el unicode contra el cmap del programa de fuente.
+#    => El motor pasa SIEMPRE el unicode de FPDFText_GetUnicode(textpage, i).
+#       Robusto a subsets remapeados. Caso duro (-> Fase 3): fuentes cuyo
+#       programa NO tiene cmap Unicode (algunas CID/simbolicas) -> GetGlyphPath
+#       devuelve [] y ese glifo va a fallback (detectable).
 #
 # 2) EL ESPACIO DE COORDENADAS ES 'em' NORMALIZADO (1.0 == 1 em).
 #    Los puntos devueltos NO dependen del argumento font_size en esta version:
@@ -57,11 +63,11 @@ cp1252: comentarios/prints en ASCII, usar '->' en vez de flechas.
 # ===========================================================================
 
 import ctypes
-from typing import Iterator, List, NamedTuple, Optional, Tuple
+from typing import Iterator, List, NamedTuple, Tuple
 
 import pypdfium2.raw as pdfium_c
 
-from .geometry import Matrix
+from .geometry import Matrix, glyph_to_page
 
 # Tipos de segmento de glyph path (verificados en el smoke-test de Fase 0).
 SEG_LINETO = 0
@@ -79,20 +85,22 @@ Command = tuple
 Subpath = List[Command]
 
 
-def get_glyph_outline(font_handle, charcode: int,
+def get_glyph_outline(font_handle, codepoint: int,
                       font_size: float = 1.0) -> List[Subpath]:
     """Contorno de un glifo como lista de subpaths en espacio 'em'.
 
-    `charcode` es el codigo de caracter de la fuente (ver Fase 0: el arg `glyph`
-    de FPDFFont_GetGlyphPath es el charcode, no el GID). `font_size` se deja en
-    1.0: la salida viene en 'em' con independencia de este valor (Fase 0), y el
-    escalado real lo aplica geometry.glyph_to_page.
+    `codepoint` es el CODEPOINT UNICODE del caracter (ver punto (1) de la
+    cabecera: el arg `glyph` de FPDFFont_GetGlyphPath es el unicode, resuelto por
+    el cmap del programa de fuente; NO el charcode del content stream ni el GID).
+    Usar FPDFText_GetUnicode(textpage, i). `font_size` se deja en 1.0: la salida
+    viene en 'em' con independencia de este valor (Fase 0), y el escalado real lo
+    aplica geometry.glyph_to_page.
 
-    Devuelve [] para glifos sin contorno (espacio, etc.). El llamador mantiene
-    el PDFIUM_LOCK.
+    Devuelve [] para glifos sin contorno (espacio, o unicode sin cmap -> fallback).
+    El llamador mantiene el PDFIUM_LOCK.
     """
     gpath = pdfium_c.FPDFFont_GetGlyphPath(
-        font_handle, charcode, ctypes.c_float(font_size))
+        font_handle, codepoint, ctypes.c_float(font_size))
     if not gpath:
         return []
     n = pdfium_c.FPDFGlyphPath_CountGlyphSegments(gpath)
@@ -214,11 +222,125 @@ def object_unicode_text(obj, textpage) -> str:
     return buf.raw[:n_bytes - 2].decode("utf-16-le", "replace")
 
 
-# NOTA DE ALCANCE (siguiente paso de Fase 1):
-# El posicionamiento por-glifo de objetos multi-caracter y el manejo robusto de
-# charcode != unicode (subsets remapeados, CID) NO estan aqui todavia. pdfium no
-# expone un getter publico del charcode por caracter (solo FPDFText_SetCharcodes;
-# hay FPDFText_GetUnicode a nivel de textpage). Para el corpus actual (ASCII/
-# latino) charcode == unicode, verificado empiricamente. La colocacion definitiva
-# se hara con validacion self-checking (outline transformado vs FPDFText_GetCharBox,
-# como en Fase 0) al construir rebuild.py.
+# ===========================================================================
+# EXTRACCION POSICIONADA (textpage-driven) -- Fase 1
+# ===========================================================================
+# Verificado empiricamente (ver scratchpad/proto_rebuild): reconstruyendo cada
+# pagina con estos glifos posicionados y renderizando, el diff de pixeles vs el
+# original es ~0.000% a 300 dpi en TODO el corpus (a 150 dpi hay ~1-4% SOLO por
+# el hinting TrueType del texto pequeno: pdfium ajusta a rejilla el original y el
+# relleno de paths puro no; desaparece al subir dpi). O sea: colocacion y
+# contorno son exactos.
+#
+# Claves del posicionamiento por-glifo (via textpage):
+#   - Recorrer indices de char [0, FPDFText_CountChars).
+#   - FPDFText_IsGenerated(tp, i) == 1  -> char inyectado por pdfium (p.ej. el
+#     '\r\n' entre lineas/objetos): OMITIR (no esta en el content).
+#   - FPDFText_GetTextObject(tp, i)     -> objeto de texto due#o (da el font).
+#   - unicode = FPDFText_GetUnicode(tp, i)  -> arg de get_glyph_outline.
+#   - font_size = FPDFText_GetFontSize(tp, i).
+#   - FPDFText_GetMatrix(tp, i) da la orientacion/escala PERO su traslacion (e,f)
+#     es el ORIGEN DEL OBJETO (constante dentro del objeto), NO la del glifo.
+#     El origen por-glifo (con kerning/TJ ya aplicado) viene de
+#     FPDFText_GetCharOrigin(tp, i). Colocacion:
+#         placement = glyph_to_page(Matrix(a, b, c, d, ox, oy), font_size)
+#   - OJO: FPDFText_GetCharBox es fiable como validador SOLO para texto sin
+#     rotacion/cizalla; para glifos rotados pdfium devuelve una caja mas holgada
+#     y en otro marco. El validador definitivo es el render (Fase 2), no el bbox.
+# ===========================================================================
+
+
+class PositionedGlyph(NamedTuple):
+    """Un glifo posicionado: contorno en 'em' + matriz que lo lleva a pagina."""
+
+    text_index: int                 # indice de char en la textpage
+    codepoint: int                  # unicode (FPDFText_GetUnicode)
+    char: str
+    subpaths: List[Subpath]         # contorno en espacio 'em'
+    placement: Matrix               # em -> pagina (incluye font_size)
+    fill_rgb: Tuple[int, int, int]
+    font_size: float
+    render_mode: int
+
+
+def _char_origin(textpage, i) -> Point:
+    x, y = ctypes.c_double(), ctypes.c_double()
+    pdfium_c.FPDFText_GetCharOrigin(textpage, i, ctypes.byref(x), ctypes.byref(y))
+    return (x.value, y.value)
+
+
+def _char_matrix(textpage, i) -> Matrix:
+    m = pdfium_c.FS_MATRIX()
+    pdfium_c.FPDFText_GetMatrix(textpage, i, ctypes.byref(m))
+    return Matrix(m.a, m.b, m.c, m.d, m.e, m.f)
+
+
+def char_box(textpage, i) -> Tuple[float, float, float, float]:
+    """Caja del char en coords de pagina (minx, miny, maxx, maxy).
+
+    Fiable como validador solo para texto sin rotacion/cizalla (ver cabecera)."""
+    l, r = ctypes.c_double(), ctypes.c_double()
+    b, t = ctypes.c_double(), ctypes.c_double()
+    pdfium_c.FPDFText_GetCharBox(textpage, i, ctypes.byref(l), ctypes.byref(r),
+                                 ctypes.byref(b), ctypes.byref(t))
+    return (l.value, b.value, r.value, t.value)
+
+
+def placement_bbox(glyph: "PositionedGlyph") -> Tuple[float, float, float, float]:
+    """BBox en pagina del glifo ya colocado (minx, miny, maxx, maxy)."""
+    pts: List[Point] = []
+    for sp in glyph.subpaths:
+        for cmd in sp:
+            if cmd[0] in ("m", "l"):
+                pts.append(glyph.placement.apply(cmd[1]))
+            elif cmd[0] == "c":
+                pts.extend(glyph.placement.apply(p) for p in cmd[1:])
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def iter_positioned_glyphs(page_handle, textpage,
+                           keep_invisible: bool = False
+                           ) -> Iterator["PositionedGlyph"]:
+    """Recorre la textpage y devuelve glifos posicionados a nivel de pagina.
+
+    Omite: chars generados por pdfium (\\r\\n entre objetos), texto invisible
+    (modo 3, salvo keep_invisible), y glifos sin contorno (espacio, o unicode
+    sin cmap -> esos ultimos deben ir a fallback, se detectan aparte con
+    get_glyph_outline vacio). El llamador mantiene el PDFIUM_LOCK y la page/doc
+    vivas (no dejar que el helper PdfPage se recolecte: cierra la page nativa).
+    """
+    n = pdfium_c.FPDFText_CountChars(textpage)
+    for i in range(n):
+        if pdfium_c.FPDFText_IsGenerated(textpage, i) == 1:
+            continue
+        obj = pdfium_c.FPDFText_GetTextObject(textpage, i)
+        if not obj:
+            continue
+        render_mode = pdfium_c.FPDFTextObj_GetTextRenderMode(obj)
+        if not keep_invisible and is_invisible(render_mode):
+            continue
+        codepoint = pdfium_c.FPDFText_GetUnicode(textpage, i)
+        font = pdfium_c.FPDFTextObj_GetFont(obj)
+        subpaths = get_glyph_outline(font, codepoint, 1.0)
+        if not subpaths:
+            continue
+        font_size = pdfium_c.FPDFText_GetFontSize(textpage, i)
+        ox, oy = _char_origin(textpage, i)
+        m = _char_matrix(textpage, i)
+        placement = glyph_to_page(Matrix(m.a, m.b, m.c, m.d, ox, oy), font_size)
+        r, g, b, a = (ctypes.c_uint() for _ in range(4))
+        pdfium_c.FPDFPageObj_GetFillColor(
+            obj, ctypes.byref(r), ctypes.byref(g),
+            ctypes.byref(b), ctypes.byref(a))
+        yield PositionedGlyph(
+            text_index=i,
+            codepoint=codepoint,
+            char=chr(codepoint) if codepoint else "",
+            subpaths=subpaths,
+            placement=placement,
+            fill_rgb=(r.value, g.value, b.value),
+            font_size=font_size,
+            render_mode=render_mode,
+        )

@@ -24,7 +24,10 @@ FPDF_SEGMENT_BEZIERTO = 1
 
 # Caso conocido: 'H' Helvetica 48pt en (100, 200) pt.
 GLYPH_CHAR = "H"
-CHARCODE = ord(GLYPH_CHAR)  # 72
+# El arg de FPDFFont_GetGlyphPath es en realidad el CODEPOINT UNICODE (refinado
+# en Fase 1 con remapped.pdf); aqui coincide con el charcode porque 'H' usa
+# encoding estandar. Ver la cabecera de glyphs.py, punto (1).
+CHARCODE = ord(GLYPH_CHAR)  # 72 (= unicode 'H')
 POS_X, POS_Y = 100.0, 200.0
 FONT_SIZE = 48.0
 PLACEMENT_TOL_PT = 1.0  # umbral de casacion con GetCharBox
