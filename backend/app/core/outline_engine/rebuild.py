@@ -28,6 +28,13 @@ def _num(v: float) -> str:
     return ("%.3f" % v)
 
 
+# Modo de render de texto invisible (PDF: Tr 3). Los glifos invisibles solo
+# llegan aqui con keep_invisible=True; se emiten SIN pintar (operador 'n') para
+# conservar su geometria sin hacerlos visibles (si se pintaran, verify_render veria
+# un cambio visual y mandaria la pagina a fallback -> la flag no serviria de nada).
+_INVISIBLE_RENDER_MODE = 3
+
+
 def glyph_to_ops(glyph: PositionedGlyph) -> bytes:
     """Operadores de path (en coords de pagina) para un glifo posicionado."""
     place = glyph.placement
@@ -48,7 +55,7 @@ def glyph_to_ops(glyph: PositionedGlyph) -> bytes:
                 ops.append((flat + " c").encode("latin-1"))
             elif kind == "h":
                 ops.append(b"h")
-    ops.append(b"f")
+    ops.append(b"n" if glyph.render_mode == _INVISIBLE_RENDER_MODE else b"f")
     ops.append(b"Q")
     return b"\n".join(ops)
 
@@ -140,27 +147,21 @@ def page_has_annotation_text(page: pikepdf.Page) -> bool:
     for annot in annots:
         try:
             ap = annot.get("/AP")
-        except Exception:
-            continue
-        if ap is None:
-            continue
-        for state_key in ("/N", "/D", "/R"):
-            stream = ap.get(state_key)
-            if stream is None:
+            if ap is None:
                 continue
-            # /N puede ser un stream (tiene /BBox) o un subdiccionario de estados
-            candidates = [stream]
-            if hasattr(stream, "keys") and "/BBox" not in stream:
-                try:
+            for state_key in ("/N", "/D", "/R"):
+                stream = ap.get(state_key)
+                if stream is None:
+                    continue
+                # /N puede ser un stream (tiene /BBox) o un subdiccionario de estados
+                candidates = [stream]
+                if hasattr(stream, "keys") and "/BBox" not in stream:
                     candidates = [stream[k] for k in stream.keys()]
-                except Exception:
-                    candidates = [stream]
-            for cand in candidates:
-                try:
+                for cand in candidates:
                     if _form_has_text(cand):
                         return True
-                except Exception:
-                    continue
+        except Exception:
+            continue  # /AP malformado -> no bloquear el analisis de la pagina
     return False
 
 
@@ -188,7 +189,12 @@ def rebuild_page(pdf: pikepdf.Pdf, page: pikepdf.Page,
 
     Devuelve la lista de nombres de fuentes eliminadas.
     """
-    body = strip_text(page)
+    # Aislar el estado grafico del contenido original con q/Q: los glifos van en
+    # coords de PAGINA (CTM identidad), pero si el contenido deja un CTM/clip
+    # residual (p.ej. un `cm` global sin q/Q, N-up, escalado de unidades) los
+    # paths saldrian transformados. El `Q` restaura el estado por defecto de la
+    # pagina que guarda nuestro `q` inicial antes de emitir los glifos.
+    body = b"q\n" + strip_text(page) + b"\nQ"
     if glyphs:
         body = body + b"\n" + glyphs_to_ops(glyphs)
     page.Contents = pdf.make_stream(body)
@@ -245,6 +251,8 @@ def page_has_xobject_text(page: pikepdf.Page) -> bool:
 def _copy_form_stripped(pdf: pikepdf.Pdf, form, depth: int = 0):
     """COPIA privada de un Form XObject con el texto quitado (recursivo) y sin
     fuentes. No muta el original (que puede estar compartido)."""
+    if depth > 12:  # forms ciclicos/muy anidados -> forzar fallback limpio
+        raise RuntimeError("Form XObject demasiado anidado o ciclico")
     new_form = pdf.make_stream(_content_without_text(form))
     for key in list(form.keys()):
         if key in ("/Length", "/Filter", "/DecodeParms"):

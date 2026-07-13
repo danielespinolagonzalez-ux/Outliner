@@ -388,6 +388,98 @@ def test_pattern_text_falls_back():
     assert "Pattern" in result.report.pages[0].reason
 
 
+def test_residual_ctm_glyphs_not_transformed():
+    """El contenido con un `cm` global sin q/Q no debe transformar los glifos
+    (que van en coords de pagina). Se comprueba con verify_render=False para
+    validar la SALIDA, no solo la red de seguridad."""
+    import sys
+    sys.path.insert(0, "backend/tests/outline_engine")
+    import gen_corpus
+    from pikepdf import Dictionary
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(300, 200))
+    f1, _n = gen_corpus._embed_simple_font(pdf, gen_corpus.DEJAVU, "Scaled text", is_cff=False)
+    page.Resources = Dictionary(Font=Dictionary(F1=f1))
+    page.Contents = pdf.make_stream(
+        b"2 0 0 2 0 0 cm 5 5 40 5 re f BT /F1 12 Tf 5 40 Td (Scaled) Tj ET")
+    out = io.BytesIO(); pdf.save(out); pdf.close()
+    data = out.getvalue()
+    result = outline_pdf(data, OutlineOpts(verify_render=False))
+    assert result.report.pages[0].outlined is True
+    assert _fontfiles(result.pdf_bytes) == 0
+
+    def _r(d):
+        doc = pdfium.PdfDocument(d)
+        try:
+            return np.asarray(doc[0].render(scale=300 / 72).to_pil().convert("L"), np.int16)
+        finally:
+            doc.close()
+    a, b = _r(data), _r(result.pdf_bytes)
+    assert a.shape == b.shape
+    assert float(np.mean(np.abs(a - b) > 8)) <= 0.005, "glifos transformados por cm residual"
+
+
+def _small_font_pdf(pt, npages=1):
+    import sys
+    sys.path.insert(0, "backend/tests/outline_engine")
+    import gen_corpus
+    from pikepdf import Dictionary
+    pdf = pikepdf.new()
+    for _ in range(npages):
+        page = pdf.add_blank_page(page_size=(600, 800))
+        f1, _n = gen_corpus._embed_simple_font(
+            pdf, gen_corpus.DEJAVU, "abcdefghijklmnopqrstuvwxyz ABCDEFG 0123456789", is_cff=False)
+        page.Resources = Dictionary(Font=Dictionary(F1=f1))
+        step = max(6, int(pt * 1.15))
+        page.Contents = pdf.make_stream(b"".join(
+            b"BT /F1 %d Tf 10 %d Td (abcdefghijklmnopqrstuvwxyz 0123456789 ABCDEFG) Tj ET "
+            % (pt, 790 - i * step) for i in range(int(760 / step))))
+    out = io.BytesIO(); pdf.save(out); pdf.close()
+    return out.getvalue()
+
+
+def test_small_font_not_falsely_rasterized():
+    """Texto pequeno (6-10pt) es correcto al outlinear; el hinting a 300 dpi NO
+    debe hacer que verify_render lo rasterice (metrica con erosion)."""
+    for pt in (6, 8, 10):
+        result = outline_pdf(_small_font_pdf(pt), OutlineOpts())
+        pr = result.report.pages[0]
+        assert pr.outlined is True and not pr.fallback, (
+            "%dpt rasterizado por falso positivo de verify" % pt)
+        assert _fontfiles(result.pdf_bytes) == 0
+
+
+def test_output_deterministic():
+    """Misma entrada -> misma salida byte a byte (deterministic_id)."""
+    import hashlib
+    data = _text_pdf([["deterministico 123"]])
+    hs = {hashlib.sha256(outline_pdf(data, OutlineOpts()).pdf_bytes).hexdigest()
+          for _ in range(3)}
+    assert len(hs) == 1, "la salida no es determinista"
+
+
+def test_keep_invisible_no_forced_fallback():
+    """keep_invisible=True no debe forzar fallback ni dejar fuentes: los glifos
+    invisibles se emiten sin pintar ('n')."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (200, 80), (220, 230, 255))
+    ImageDraw.Draw(img).rectangle([10, 10, 60, 60], fill=(200, 60, 60))
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(220, 100))
+    c.drawImage(ImageReader(img), 10, 10, 200, 80)
+    t = c.beginText(20, 50)
+    t.setFont("DVrobust", 20)
+    t.setTextRenderMode(3)
+    t.textOut("hidden ocr")
+    c.drawText(t)
+    c.showPage()
+    c.save()
+    result = outline_pdf(buf.getvalue(), OutlineOpts(keep_invisible=True))
+    pr = result.report.pages[0]
+    assert pr.outlined is True and not pr.fallback
+    assert _fontfiles(result.pdf_bytes) == 0
+
+
 def test_huge_page_verify_does_not_crash():
     """Pagina enorme (verify OOM): NO debe convertir un outline valido en crash;
     se entrega con warning de 'no verificado'."""

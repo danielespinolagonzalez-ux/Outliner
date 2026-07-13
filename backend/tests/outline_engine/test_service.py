@@ -28,3 +28,9 @@ def test_service_unknown_engine(corpus, monkeypatch):
     monkeypatch.setenv("OUTLINER_ENGINE", "banana")
     with pytest.raises(ValueError):
         outline_pdf_service(corpus["latino_ttf.pdf"])
+
+
+def test_service_invalid_fallback(corpus, monkeypatch):
+    monkeypatch.delenv("OUTLINER_ENGINE", raising=False)
+    with pytest.raises(ValueError):
+        outline_pdf_service(corpus["latino_ttf.pdf"], fallback="bogus")

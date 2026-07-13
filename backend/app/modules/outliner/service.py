@@ -30,6 +30,8 @@ def outline_pdf_service(pdf_bytes: bytes, *, fallback: str = "raster",
     La salida (bytes + report JSON-able) es la que el endpoint devuelve y la que
     se registra en core/history al integrar en PrintHub.
     """
+    if fallback not in ("raster", "skip", "error"):
+        raise ValueError("fallback desconocido: %r (usar 'raster'|'skip'|'error')" % fallback)
     engine = get_engine()
     if engine == "ghostscript":
         raise NotImplementedError(

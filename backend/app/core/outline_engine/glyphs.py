@@ -426,6 +426,13 @@ def analyze_page_glyphs(page_handle, textpage,
             continue
         glyph = _build_positioned_glyph(
             textpage, i, obj, font, codepoint, render_mode, subpaths)
+        # Matriz no finita/degenerada (NaN/inf): las comparaciones del self-check
+        # con NaN dan False y el glifo se colaria sin validar -> tratarlo como no
+        # convertible (defensa; el trigger es raro pero verify_render no siempre
+        # cubre un glifo aislado).
+        if not glyph.placement.is_finite() or abs(glyph.placement.determinant()) < 1e-9:
+            unoutlineable += 1
+            continue
         # SELF-CHECK: para texto SIN rotacion/cizalla, el bbox del glifo colocado
         # debe casar con FPDFText_GetCharBox. Si no, el glifo extraido no es el que
         # pdfium dibuja (p.ej. CID Identity-H sin ToUnicode: el unicode del textpage

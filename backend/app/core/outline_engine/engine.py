@@ -50,11 +50,14 @@ class OutlineOpts:
     # Red de seguridad: tras outlinear, render de cada pagina outlineada vs
     # original; si difieren mas de verify_threshold -> esa pagina va a fallback
     # (captura CUALQUIER corrupcion visual: glifo erroneo, color perdido dentro de
-    # BT..ET, CTM desbalanceada, capa OCG horneada, transparencia, etc.). A 300
-    # dpi las paginas correctas dan ~0%. Desactivable para lotes grandes.
+    # BT..ET, CTM desbalanceada, capa OCG horneada, transparencia, etc.).
+    # El diff usa EROSION 4-vecinos: elimina las diferencias de 1px de ancho (el
+    # hinting del texto pequeno mete muchas a 300 dpi) y conserva los blobs 2D de
+    # la corrupcion real -> separa limpio (texto correcto <0.4%, corrupcion >2%)
+    # sin falsos positivos que rasterizarian texto pequeno correcto. Desactivable.
     verify_render: bool = True
     verify_dpi: int = 300
-    verify_threshold: float = 0.02
+    verify_threshold: float = 0.01
 
 
 @dataclass
@@ -122,9 +125,26 @@ def _page_reasons(analysis: PageGlyphAnalysis, page: pikepdf.Page) -> List[str]:
     return reasons
 
 
+def _any_widget_remains(pdf: pikepdf.Pdf) -> bool:
+    """True si alguna pagina de salida conserva una anotacion /Widget (form)."""
+    for page in pdf.pages:
+        annots = page.get("/Annots")
+        if not annots:
+            continue
+        for annot in annots:
+            try:
+                if str(annot.get("/Subtype")) == "/Widget":
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 def _save_pdf(pdf: pikepdf.Pdf) -> bytes:
     out = io.BytesIO()
-    pdf.save(out)
+    # deterministic_id: misma entrada -> misma salida (util para cache/history y
+    # tests); si no, pikepdf mete un /ID aleatorio.
+    pdf.save(out, deterministic_id=True)
     return out.getvalue()
 
 
@@ -132,6 +152,20 @@ def _render_gray(doc, index, dpi):
     page = doc[index]  # mantener vivo durante el render
     pil = page.render(scale=dpi / 72.0).to_pil().convert("L")
     return np.asarray(pil, dtype=np.int16)
+
+
+def _eroded_diff_ratio(a, b) -> float:
+    """Fraccion de pixeles distintos tras EROSION 4-vecinos del mapa de diferencia.
+
+    Un pixel cuenta solo si el y sus 4 vecinos difieren -> las diferencias de 1px
+    de ancho (hinting del texto pequeno: pdfium ajusta a rejilla el original y el
+    relleno de paths no) se eliminan, y los blobs 2D (glifo erroneo/faltante,
+    color, etc.) se conservan. Separa texto correcto de corrupcion real.
+    """
+    m = np.abs(a - b) > 8
+    eroded = (m & np.roll(m, 1, 0) & np.roll(m, -1, 0)
+              & np.roll(m, 1, 1) & np.roll(m, -1, 1))
+    return float(np.mean(eroded))
 
 
 def _verify_outlined_pages(orig_bytes, out_bytes, report, opts):
@@ -164,7 +198,7 @@ def _verify_outlined_pages(orig_bytes, out_bytes, report, opts):
                     except Exception:
                         unverifiable.append(idx)
                         continue
-                    if a.shape != b.shape or float(np.mean(np.abs(a - b) > 8)) > opts.verify_threshold:
+                    if a.shape != b.shape or _eroded_diff_ratio(a, b) > opts.verify_threshold:
                         failed.append(idx)
             finally:
                 ndoc.close()
@@ -261,7 +295,12 @@ def outline_pdf(data: Union[bytes, bytearray, str, os.PathLike],
                         _fallback_page(pdf, page, pdf_bytes, i, opts, report,
                                        "texto en Form XObject no neutralizable: %s" % exc)
                         continue
-                removed = rebuild_page(pdf, page, analysis.glyphs) + xobj_removed
+                try:
+                    removed = rebuild_page(pdf, page, analysis.glyphs) + xobj_removed
+                except Exception as exc:  # parseo/reescritura fallida -> fallback, no crash
+                    _fallback_page(pdf, page, pdf_bytes, i, opts, report,
+                                   "reescritura del content stream fallida: %s" % exc)
+                    continue
                 page_report = PageReport(
                     index=i, outlined=True,
                     outlined_glyphs=len(analysis.glyphs), removed_fonts=removed)
@@ -276,12 +315,20 @@ def outline_pdf(data: Union[bytes, bytearray, str, os.PathLike],
 
         # Si alguna pagina cayo a fallback por texto de anotaciones, esas fuentes
         # se referencian desde /Root/AcroForm/DR (nivel documento) y sobrevivirian
-        # al rasterizado de la pagina. El raster ya horneo las apariencias -> se
-        # quita el AcroForm para que remove_unreferenced_resources borre esas fuentes.
+        # al rasterizado. El raster ya horneo esas apariencias -> se quita el
+        # AcroForm para que remove_unreferenced_resources borre las fuentes /DR.
+        # PERO solo si NINGUNA pagina de salida conserva widgets (si otra pagina se
+        # outlineo y mantiene un form widget, borrar el AcroForm lo dejaria huerfano
+        # y descartaria /XFA) -> en ese caso se deja y se avisa.
         if any("anotacion" in (p.reason or "") for p in report.pages):
             try:
                 if "/AcroForm" in pdf.Root:
-                    del pdf.Root.AcroForm
+                    if _any_widget_remains(pdf):
+                        report.pages[0].warnings.append(
+                            "AcroForm conservado (otras paginas tienen widgets): "
+                            "alguna fuente de /DR puede permanecer")
+                    else:
+                        del pdf.Root.AcroForm
             except Exception:
                 pass
 
