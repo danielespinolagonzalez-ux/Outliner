@@ -14,7 +14,7 @@ vectoriales, para reemplazar el uso de **Ghostscript (AGPL-3.0)** en el módulo
 - **API pública**: `outline_pdf(pdf_bytes|path, OutlineOpts()) -> OutlineResult(pdf_bytes, report)`.
 - Fidelidad **~0% a 300 dpi** en todo el corpus outlineable, **cero fuentes
   incrustadas**, texto no extraíble. Casos duros → **fallback raster** con report.
-- **82 tests** en `backend/tests/outline_engine/`.
+- **91 tests** en `backend/tests/outline_engine/`.
 
 Uso:
 

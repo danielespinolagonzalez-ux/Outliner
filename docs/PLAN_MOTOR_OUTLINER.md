@@ -324,7 +324,7 @@ Objetivo: PDF de salida idéntico visualmente, con el texto convertido a paths.
 
 ## ESTADO FINAL (Fases 0-4 ejecutadas + hardening por revisión adversarial)
 
-Motor completo y en verde. **Suite: 86 tests.** Fidelidad de outline **~0% a
+Motor completo y en verde. **Suite: 91 tests.** Fidelidad de outline **~0% a
 300 dpi** en todo el corpus outlineable (latino TTF/CFF, subset, multipos
 rotado+TJ, color CMYK, mixto, no-embebida, remapped charcode!=unicode, CID con
 ToUnicode, texto en Form XObject) con **cero fuentes incrustadas** y texto no
@@ -348,7 +348,7 @@ ignorado; colocación `glyph_to_page(Matrix(a,b,c,d, CharOrigin), font_size)`.
    `BT..ET`, CTM desbalanceada, capa **OCG** horneada, **transparencia**, relleno
    por **patrón** aplanado. Páginas correctas a 300 dpi dan ~0% (sin falsos
    positivos). Además: `privatize_resources` (copy-on-write) evita romper páginas
-   que comparten `/Resources`; anotaciones con fuentes en `/AP` → fallback.
+   que comparten `/Resources`; anotaciones con texto en `/AP` (incluidas fuentes del AcroForm `/DR`) y texto en tiling Patterns → fallback; `strip_text` conserva el estado grafico (color) fijado dentro de `BT..ET`; `fallback='skip'` revierte al original en vez de rasterizar; la verificacion es defensiva ante fallos de render (no convierte un outline valido en crash).
 
 ### Mejoras futuras (hoy → fallback seguro, sin corrupción)
 Emitir `S`/`B` para stroke; detección explícita de patrón/shading (`/scn`) sin
