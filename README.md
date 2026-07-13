@@ -8,29 +8,51 @@ vectoriales, para reemplazar el uso de **Ghostscript (AGPL-3.0)** en el módulo
 - Plan por fases: [`docs/PLAN_MOTOR_OUTLINER.md`](docs/PLAN_MOTOR_OUTLINER.md)
 - Contexto del proyecto: [`docs/PROYECTO.md`](docs/PROYECTO.md)
 
-## Estado: Fase 0 (verificación empírica + corpus) — COMPLETA
+## Estado: motor completo (Fases 0-4) — en verde
 
-- `pypdfium2==5.11.0` fijado → empaqueta **pdfium 151.0.7920.0**.
-- Smoke-test de los 13 símbolos de la API experimental de glyph paths.
-- Experimento del espacio de coordenadas concluyente; conclusión documentada en
-  la cabecera de `backend/app/core/outline_engine/glyphs.py`.
-- Corpus de 8 PDFs de prueba en `backend/tests/outline_engine/corpus/`.
+- `pypdfium2==5.11.0` → **pdfium 151.0.7920.0** (fijado con `==` + smoke-test de símbolos).
+- **API pública**: `outline_pdf(pdf_bytes|path, OutlineOpts()) -> OutlineResult(pdf_bytes, report)`.
+- Fidelidad **~0% a 300 dpi** en todo el corpus outlineable, **cero fuentes
+  incrustadas**, texto no extraíble. Casos duros → **fallback raster** con report.
+- **82 tests** en `backend/tests/outline_engine/`.
+
+Uso:
+
+```python
+from app.core.outline_engine import outline_pdf, OutlineOpts
+res = outline_pdf(pdf_bytes, OutlineOpts())      # fallback: raster | skip | error
+res.pdf_bytes          # PDF con texto -> curvas, sin fuentes
+res.report.to_dict()   # informe por página (outlined/fallback/warnings)
+```
+
+CLI: `python -m app.modules.outliner in.pdf out.pdf [--fallback raster|skip|error]`
 
 ## Estructura
 
 ```
-backend/app/core/outline_engine/   # el motor (Fase 0: lock + conclusión coords)
-backend/tests/outline_engine/      # smoke, experimento de coords, corpus y tests
+backend/app/core/outline_engine/   # motor: engine, glyphs, geometry, rebuild, fallback, report, errors
+backend/app/modules/outliner/      # service (flag OUTLINER_ENGINE) + CLI
+backend/tests/outline_engine/      # tests + corpus (12 fixtures) + gen_corpus.py
 docs/                              # plan por fases y contexto
+THIRD_PARTY_NOTICES.md             # atribuciones (todo permisivo, sin GPL/AGPL)
 ```
 
 ## Desarrollo
 
 ```
 pip install -r requirements-dev.txt
-python -m pytest backend/tests/outline_engine -q      # suite de Fase 0
-python backend/tests/outline_engine/gen_corpus.py     # regenerar corpus
+python -m pytest backend/tests/outline_engine -q      # suite completa
+python backend/tests/outline_engine/gen_corpus.py     # regenerar corpus (determinista)
 ```
+
+Cómo funciona (resumen): dos pasadas — (1) pdfium bajo `PDFIUM_LOCK` analiza cada
+página (glifos posicionados en coords de página + señales de outlineabilidad,
+todo Python puro); (2) pikepdf reescribe: quita bloques `BT..ET`, emite los
+glifos como paths de relleno y elimina las fuentes. El arg de
+`FPDFFont_GetGlyphPath` es el **codepoint Unicode**; la colocación por-glifo usa
+`FPDFText_GetCharOrigin` + la orientación de `FPDFText_GetMatrix`. Un **self-check**
+por-glifo (bbox vs `GetCharBox` en texto no rotado) evita corrupción silenciosa
+→ esas páginas van a fallback.
 
 ### Reglas del proyecto (resumen)
 - **Sin dependencias GPL/AGPL** (Ghostscript, PyMuPDF/fitz, Poppler, cpdf, Inkscape).

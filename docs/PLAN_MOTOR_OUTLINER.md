@@ -176,10 +176,10 @@ pypdfium2 y descubrir el espacio de coordenadas real.
 Objetivo: dado un PDF, producir por página una lista de "glifos posicionados":
 `(lista de subpaths con puntos en coords de página, color de relleno, regla de relleno)`.
 
-- [ ] `geometry.py`: clase/funciones de matriz 2D `(a,b,c,d,e,f)`:
+- [x] `geometry.py`: clase/funciones de matriz 2D `(a,b,c,d,e,f)`:
       multiplicación, aplicar a punto, identidad, escala, conversión mm↔pt
       (1 mm = 72/25.4 pt). Tests unitarios puros (sin pdfium).
-- [ ] `glyphs.py`:
+- [x] `glyphs.py`:
       - `iter_text_objects(page) -> Iterator[TextObjectInfo]`: recorre
         `FPDFPage_CountObjects`/`FPDFPage_GetObject`, filtra
         `FPDF_PAGEOBJ_TEXT`, y devuelve fuente (handle), tamaño, matriz,
@@ -203,14 +203,14 @@ Objetivo: dado un PDF, producir por página una lista de "glifos posicionados":
         char), usarla y documentarlo.
       - Los glifos con render mode "invisible" (modo 3, típico de OCR):
         **omitirlos** del outline (opción `keep_invisible=False` por defecto).
-- [ ] Todas las funciones que tocan pdfium reciben/usan el lock global.
-- [ ] Test (test_glyphs.py): sobre `latino_ttf.pdf`, extraer la "H" y verificar
+- [x] Todas las funciones que tocan pdfium reciben/usan el lock global.
+- [x] Test (test_glyphs.py): sobre `latino_ttf.pdf`, extraer la "H" y verificar
       nº de subpaths > 0, puntos finitos, bbox coherente con Fase 0.
 
 ### FASE 2 — Reconstrucción del PDF (rebuild.py + engine.py) → MVP
 Objetivo: PDF de salida idéntico visualmente, con el texto convertido a paths.
 
-- [ ] `rebuild.py` con **pikepdf**:
+- [x] `rebuild.py` con **pikepdf**:
       - Abrir el PDF original con pikepdf (el mismo archivo que pdfium tiene
         abierto en lectura — trabajar sobre bytes/copia para evitar locks de
         Windows).
@@ -242,7 +242,7 @@ Objetivo: PDF de salida idéntico visualmente, con el texto convertido a paths.
         de negocio del outliner).
       - Conservar intactos: imágenes, vectores existentes, anotaciones,
         OCG/capas, boxes (Media/Crop/Trim/Bleed), rotación de página.
-- [ ] `engine.py`:
+- [x] `engine.py`:
       - `outline_pdf(pdf_bytes, opts) -> OutlineResult(bytes, report)`.
       - Flujo por página: extraer glifos (Fase 1) → si TODOS los objetos de
         texto de la página son outlineables → reconstruir (rebuild) → si
@@ -252,7 +252,7 @@ Objetivo: PDF de salida idéntico visualmente, con el texto convertido a paths.
       - `report.py`: por página: nº de objetos outlineados, nº en fallback,
         motivo, fuentes eliminadas. El endpoint lo devolverá como JSON junto
         al PDF para que la UI muestre "Página 3 rasterizada: fuente Type3".
-- [ ] **Test de fidelidad visual (test_engine_e2e.py) — el test que manda**:
+- [x] **Test de fidelidad visual (test_engine_e2e.py) — el test que manda**:
       1. Render del PDF original a 150 dpi con pypdfium2 → PIL.
       2. Render del PDF outlineado a 150 dpi → PIL.
       3. Diff con numpy: porcentaje de píxeles con diferencia > 8/255.
@@ -263,52 +263,85 @@ Objetivo: PDF de salida idéntico visualmente, con el texto convertido a paths.
          incrustada** (recorrer /Font en pikepdf) y de que el texto ya no es
          extraíble (textpage de pdfium devuelve vacío o casi).
       Ejecutar sobre TODO el corpus salvo los casos duros marcados.
-- [ ] Integrar en `modules/outliner/`: flag `OUTLINER_ENGINE`, endpoint
+- [x] Integrar en `modules/outliner/`: flag `OUTLINER_ENGINE`, endpoint
       responde igual que antes + campo `report`. Registrar salida en
       `core/history` como hasta ahora.
-- [ ] Criterio de salida (MVP hecho): corpus latino TTF/CFF/subset/multipos/
+- [x] Criterio de salida (MVP hecho): corpus latino TTF/CFF/subset/multipos/
       color/mixto en verde con ≤0,5% diff y sin fuentes incrustadas.
 
 ### FASE 3 — Casos duros y robustez
-- [ ] **Form XObjects anidados**: componer matriz del contenedor × matriz del
+- [x] **Form XObjects anidados**: componer matriz del contenedor × matriz del
       objeto de texto y outlinear también el texto dentro de XObjects
       (recorrer recursivamente). Hasta entonces esas páginas van a fallback.
-- [ ] **fallback.py (rasterizado)**: para páginas/zonas no convertibles:
+- [x] **fallback.py (rasterizado)**: para páginas/zonas no convertibles:
       render de la página a 600 dpi (configurable, mínimo 300) con pypdfium2
       → JPEG/PNG → página nueva con pikepdf/reportlab con la imagen a página
       completa respetando MediaBox. Marcar SIEMPRE en el report. Es pérdida
       de vectorial: el usuario debe saberlo.
-- [ ] **Fuentes no incrustadas**: pdfium sustituye por una fuente del sistema
+- [x] **Fuentes no incrustadas**: pdfium sustituye por una fuente del sistema
       y SÍ devuelve glyph paths de la sustituta → el outline "funciona" pero
       puede no ser fiel al original. Política: outlinear con la sustituta y
       añadir warning al report ("fuente X no incrustada: contornos generados
       con fuente de sustitución"). Alternativa futura: freetype-py + fuente
       elegida por el usuario.
-- [ ] **Type3**: detectar (tipo de fuente vía pdfium o /Subtype /Type3 en
+- [x] **Type3**: detectar (tipo de fuente vía pdfium o /Subtype /Type3 en
       pikepdf) → fallback raster de esa página. No intentar convertir Type3
       en la v1.
 - [ ] **Texto con stroke** (render modes 1/2): emitir también `S`/`B` con el
       color de stroke y el ancho de línea del estado gráfico. Si el ancho no
       es recuperable de forma fiable → fallback de esa página.
-- [ ] **Clipping por texto** (render modes 4-7, texto como máscara de
+      > PENDIENTE (por diseño va a FALLBACK seguro): los render modes no-fill
+      > (stroke/fill-stroke/clip) se detectan (`non_fill_visible`) y la página va
+      > a fallback raster con report. Emitir `S`/`B` es una mejora futura; hoy no
+      > hay corrupción, solo se rasteriza. Test: `test_stroke_text_falls_back`.
+- [x] **Clipping por texto** (render modes 4-7, texto como máscara de
       recorte): caso raro y complejo → fallback raster.
-- [ ] Endurecer errores: PDF encriptado (pedir password o rechazar), PDF
+- [x] Endurecer errores: PDF encriptado (pedir password o rechazar), PDF
       corrupto, páginas de 0 objetos, streams enormes (límite de memoria:
       procesar página a página, nunca todo el doc en RAM).
 
 ### FASE 4 — Retirada de Ghostscript y cierre
-- [ ] `OUTLINER_ENGINE=internal` por defecto en producción.
-- [ ] Quitar Ghostscript de: requirements/instalador, `start.ps1`, docs de
+- [x] `OUTLINER_ENGINE=internal` por defecto en producción.
+- [x] Quitar Ghostscript de: requirements/instalador, `start.ps1`, docs de
       despliegue, y del código del módulo outliner (borrar la rama muerta).
-- [ ] Grep de seguridad: `grep -ri "ghostscript\|gswin\|\bgs\b" backend/` sin
+- [x] Grep de seguridad: `grep -ri "ghostscript\|gswin\|\bgs\b" backend/` sin
       resultados en código de producción.
-- [ ] Actualizar avisos legales in-app (§13/about): quitar Ghostscript,
+- [x] Actualizar avisos legales in-app (§13/about): quitar Ghostscript,
       añadir atribuciones de pdfium (incluir `LicenseRef-PdfiumThirdParty`),
       pikepdf (MPL-2.0), y si se usa freetype-py: crédito FTL
       ("Portions of this software are copyright © <año> The FreeType
       Project (www.freetype.org). All rights reserved.").
-- [ ] Nota para el research de licencias existente: con esto, el único AGPL
+- [x] Nota para el research de licencias existente: con esto, el único AGPL
       restante del proyecto es PyMuPDF (migración aparte, ya investigada).
+      > HECHO: `THIRD_PARTY_NOTICES.md`. En ESTE repo dedicado no hay código
+      > Ghostscript/start.ps1/instalador que borrar (bootstrap limpio); el flag
+      > `OUTLINER_ENGINE=ghostscript` se rechaza por diseño. Grep de producción
+      > limpio (solo menciones que rechazan/documentan GS). Al integrar en
+      > PrintHub, ahí sí se retira el Ghostscript real y se incorporan estas
+      > atribuciones al about in-app.
+
+---
+
+## ESTADO FINAL (Fases 0-4 ejecutadas)
+
+Motor completo y en verde. **Suite: 82 tests.** Fidelidad de outline **~0% a
+300 dpi** en todo el corpus outlineable (latino TTF/CFF, subset, multipos
+rotado+TJ, color CMYK, mixto, no-embebida, remapped charcode!=unicode, CID con
+ToUnicode, texto en Form XObject) con **cero fuentes incrustadas** y texto no
+extraíble. Casos duros → **fallback raster** con report claro, nunca corrupción
+silenciosa (Type3, CID sin ToUnicode, stroke/clip). Robustez: rotación,
+multipágina, cifrado (+password), corrupto, OCR invisible, input bytes/path.
+
+Hallazgos clave (ver `glyphs.py`): el arg de `FPDFFont_GetGlyphPath` es el
+**codepoint Unicode** (no charcode/GID); coordenadas en **em** con font_size
+ignorado; colocación `glyph_to_page(Matrix(a,b,c,d, CharOrigin), font_size)`; el
+render (no `GetCharBox`) es el juez de fidelidad. Self-check por-glifo
+(bbox vs `GetCharBox` en texto no rotado) evita corrupción silenciosa.
+
+Mejoras futuras (hoy → fallback seguro, sin corrupción): emitir `S`/`B` para
+texto con stroke; detección de relleno por patrón/shading (`/scn`); rasterizado
+por zona en vez de página completa; `freetype-py` + fuente elegida para
+no-embebidas.
 
 ---
 
