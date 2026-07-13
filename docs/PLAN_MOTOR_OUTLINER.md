@@ -322,26 +322,40 @@ Objetivo: PDF de salida idéntico visualmente, con el texto convertido a paths.
 
 ---
 
-## ESTADO FINAL (Fases 0-4 ejecutadas)
+## ESTADO FINAL (Fases 0-4 ejecutadas + hardening por revisión adversarial)
 
-Motor completo y en verde. **Suite: 82 tests.** Fidelidad de outline **~0% a
+Motor completo y en verde. **Suite: 86 tests.** Fidelidad de outline **~0% a
 300 dpi** en todo el corpus outlineable (latino TTF/CFF, subset, multipos
 rotado+TJ, color CMYK, mixto, no-embebida, remapped charcode!=unicode, CID con
 ToUnicode, texto en Form XObject) con **cero fuentes incrustadas** y texto no
-extraíble. Casos duros → **fallback raster** con report claro, nunca corrupción
-silenciosa (Type3, CID sin ToUnicode, stroke/clip). Robustez: rotación,
-multipágina, cifrado (+password), corrupto, OCR invisible, input bytes/path.
+extraíble. Casos duros → **fallback raster** con report claro, **nunca
+corrupción silenciosa**. Robustez: rotación, multipágina, cifrado (+password),
+corrupto, 0-páginas, OCR invisible, input bytes/path, recursos compartidos.
 
 Hallazgos clave (ver `glyphs.py`): el arg de `FPDFFont_GetGlyphPath` es el
 **codepoint Unicode** (no charcode/GID); coordenadas en **em** con font_size
-ignorado; colocación `glyph_to_page(Matrix(a,b,c,d, CharOrigin), font_size)`; el
-render (no `GetCharBox`) es el juez de fidelidad. Self-check por-glifo
-(bbox vs `GetCharBox` en texto no rotado) evita corrupción silenciosa.
+ignorado; colocación `glyph_to_page(Matrix(a,b,c,d, CharOrigin), font_size)`.
 
-Mejoras futuras (hoy → fallback seguro, sin corrupción): emitir `S`/`B` para
-texto con stroke; detección de relleno por patrón/shading (`/scn`); rasterizado
-por zona en vez de página completa; `freetype-py` + fuente elegida para
-no-embebidas.
+### Tres redes anti-corrupción (defensa en profundidad)
+1. **Señales de outlineabilidad** (`analyze_page_glyphs`): glifo con tinta sin
+   contorno o codepoint 0 (Type3/CID sin cmap) → `unoutlineable`; render modes
+   no-fill (stroke/clip) → `non_fill_visible`; ambos → fallback.
+2. **Self-check por-glifo**: en texto NO rotado, bbox del glifo colocado vs
+   `FPDFText_GetCharBox` (glifo equivocado ≥3.5pt vs correcto <0.35pt) → fallback.
+3. **Verificación por render** (`verify_render`, default on, 300 dpi, 2%): render
+   de cada página outlineada vs original; si difieren → fallback. Captura lo que
+   1 y 2 no ven: glifo erróneo en texto **rotado**, color perdido dentro de
+   `BT..ET`, CTM desbalanceada, capa **OCG** horneada, **transparencia**, relleno
+   por **patrón** aplanado. Páginas correctas a 300 dpi dan ~0% (sin falsos
+   positivos). Además: `privatize_resources` (copy-on-write) evita romper páginas
+   que comparten `/Resources`; anotaciones con fuentes en `/AP` → fallback.
+
+### Mejoras futuras (hoy → fallback seguro, sin corrupción)
+Emitir `S`/`B` para stroke; detección explícita de patrón/shading (`/scn`) sin
+render; aplanado de anotaciones en vez de rasterizar la página; rasterizado por
+zona; `freetype-py` + fuente elegida para no-embebidas; emisión CMYK/spot nativa
+(hoy el color de impresión se aplana a DeviceRGB — la fidelidad de pantalla es
+correcta, la de prensa CMYK/Pantone es una mejora pendiente).
 
 ---
 
