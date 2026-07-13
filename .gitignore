@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Entornos
+.venv/
+venv/
+env/
+
+# Test / cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Datos de trabajo (fuera de git en PrintHub)
+backend/workdir/
+
+# SO / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

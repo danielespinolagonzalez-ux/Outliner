@@ -1,0 +1,12 @@
+# Motor interno texto-a-curvas (outliner) - dependencias de runtime.
+# Todas permisivas (sin GPL/AGPL). Ver docs/PLAN_MOTOR_OUTLINER.md seccion 0.
+#
+# pypdfium2 expone la API experimental de glyph paths de PDFium. Como esa API
+# puede cambiar entre versiones, se FIJA con == y se acompana un smoke-test de
+# simbolos (backend/tests/outline_engine/test_symbols_smoke.py).
+#
+# pypdfium2 5.11.0 -> empaqueta pdfium 151.0.7920.0
+#   (pypdfium2.version.PDFIUM_INFO == 151.0.7920.0 ; build pdfium == 7920)
+pypdfium2==5.11.0        # Apache-2.0 / BSD-3 : glyph paths + render de verificacion
+pikepdf>=10.9            # MPL-2.0 : reescritura del PDF final (fases 2+)
+numpy>=1.24              # BSD : diff de pixeles en tests de fidelidad

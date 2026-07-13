@@ -1,0 +1,5 @@
+# Dependencias solo de desarrollo/test del motor outliner (permisivas).
+-r requirements.txt
+reportlab>=4.0           # BSD : generacion del corpus de PDFs de prueba
+pytest>=8.0              # MIT : runner de tests
+fonttools>=4.0           # MIT : inspeccion de fuentes (verificar tabla CFF, subsets)
