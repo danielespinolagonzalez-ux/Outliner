@@ -34,7 +34,7 @@ def render_page_jpeg(pdf_bytes: bytes, page_index: int, dpi: int
         finally:
             doc.close()
     buf = io.BytesIO()
-    pil.save(buf, format="JPEG", quality=92)
+    pil.save(buf, format="JPEG", quality=95)
     return buf.getvalue(), pil.width, pil.height
 
 

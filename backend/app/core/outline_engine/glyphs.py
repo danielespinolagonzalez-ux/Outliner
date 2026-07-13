@@ -286,6 +286,11 @@ def char_box(textpage, i) -> Tuple[float, float, float, float]:
     return (l.value, b.value, r.value, t.value)
 
 
+def _is_axis_aligned(m: Matrix) -> bool:
+    """True si la matriz no tiene rotacion/cizalla (solo escala+traslacion)."""
+    return abs(m.b) < 1e-6 and abs(m.c) < 1e-6
+
+
 def placement_bbox(glyph: "PositionedGlyph") -> Tuple[float, float, float, float]:
     """BBox en pagina del glifo ya colocado (minx, miny, maxx, maxy)."""
     pts: List[Point] = []
@@ -409,9 +414,23 @@ def analyze_page_glyphs(page_handle, textpage,
                 if w > 0.1 and h > 0.1:
                     unoutlineable += 1  # tinta real que no pudimos convertir
             continue
+        glyph = _build_positioned_glyph(
+            textpage, i, obj, font, codepoint, render_mode, subpaths)
+        # SELF-CHECK: para texto SIN rotacion/cizalla, el bbox del glifo colocado
+        # debe casar con FPDFText_GetCharBox. Si no, el glifo extraido no es el que
+        # pdfium dibuja (p.ej. CID Identity-H sin ToUnicode: el unicode del textpage
+        # no es el correcto) -> lo tratamos como no convertible para NO corromper en
+        # silencio. Los glifos rotados no se validan aqui (GetCharBox no es fiable);
+        # el render de fidelidad es el ultimo juez.
+        if _is_axis_aligned(glyph.placement):
+            bb = placement_bbox(glyph)
+            cb = char_box(textpage, i)
+            tol = max(1.0, 0.08 * glyph.font_size)
+            if max(abs(bb[j] - cb[j]) for j in range(4)) > tol:
+                unoutlineable += 1
+                continue
         if not pdfium_c.FPDFFont_GetIsEmbedded(font):
             non_embedded.add(_font_base_name(font) or "(sin nombre)")
-        glyphs.append(_build_positioned_glyph(
-            textpage, i, obj, font, codepoint, render_mode, subpaths))
+        glyphs.append(glyph)
     return PageGlyphAnalysis(glyphs, unoutlineable, non_fill, real,
                              sorted(non_embedded))

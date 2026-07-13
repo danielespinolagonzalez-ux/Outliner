@@ -89,8 +89,9 @@ def _page_reasons(analysis: PageGlyphAnalysis, page: pikepdf.Page) -> List[str]:
     """Motivos por los que una pagina NO es outlineable en Fase 2 (-> fallback)."""
     reasons: List[str] = []
     if analysis.unoutlineable_inked:
-        reasons.append("%d glifo(s) con tinta sin contorno extraible "
-                       "(Type3 o fuente sin cmap Unicode)" % analysis.unoutlineable_inked)
+        reasons.append("%d glifo(s) con tinta no convertible: sin contorno o con "
+                       "contorno que no casa con su posicion (Type3, o CID/fuente "
+                       "sin unicode fiable)" % analysis.unoutlineable_inked)
     if analysis.non_fill_visible:
         reasons.append("%d glifo(s) con render mode no-fill (stroke/clip)"
                        % analysis.non_fill_visible)

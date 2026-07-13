@@ -365,6 +365,75 @@ def gen_remapped():
     return _save_det(pdf)
 
 
+def _build_cid(text, with_tounicode):
+    """PDF con fuente CID Type0 (Identity-H, CIDFontType2, FontFile2 DejaVu subset).
+
+    with_tounicode=True: incluye ToUnicode -> la textpage da el unicode correcto y
+    el motor lo outlinea. False: sin ToUnicode -> el 'unicode' del textpage es el GID
+    (no fiable); el self-check detecta el desajuste y la pagina va a fallback.
+    """
+    f = FTFont(str(DEJAVU), recalcTimestamp=False)
+    upm = f["head"].unitsPerEm
+    opts = Options()
+    opts.notdef_outline = True
+    opts.glyph_names = True
+    subsetter = Subsetter(options=opts)
+    subsetter.populate(unicodes=[ord(c) for c in set(text)])
+    subsetter.subset(f)
+    cmap = f.getBestCmap()
+    scale = 1000.0 / upm
+    gid = {c: (f.getGlyphID(cmap[ord(c)]) if ord(c) in cmap else 0) for c in set(text)}
+    buf = io.BytesIO()
+    f.save(buf)
+    program = buf.getvalue()
+    head = f["head"]
+    f.close()
+
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(360, 120))
+    fontfile = pdf.make_stream(program)
+    fontfile.Length1 = len(program)
+    descriptor = pdf.make_indirect(Dictionary(
+        Type=Name("/FontDescriptor"), FontName=Name("/DejaVuSans"), Flags=4,
+        FontBBox=Array([round(v * scale) for v in
+                        (head.xMin, head.yMin, head.xMax, head.yMax)]),
+        ItalicAngle=0, Ascent=759, Descent=-240, CapHeight=729, StemV=80))
+    descriptor[Name("/FontFile2")] = pdf.make_indirect(fontfile)
+    cidfont = pdf.make_indirect(Dictionary(
+        Type=Name("/Font"), Subtype=Name("/CIDFontType2"), BaseFont=Name("/DejaVuSans"),
+        CIDSystemInfo=Dictionary(Registry=pikepdf.String("Adobe"),
+                                 Ordering=pikepdf.String("Identity"), Supplement=0),
+        FontDescriptor=descriptor, CIDToGIDMap=Name("/Identity"), DW=600))
+    d = dict(Type=Name("/Font"), Subtype=Name("/Type0"), BaseFont=Name("/DejaVuSans"),
+             Encoding=Name("/Identity-H"), DescendantFonts=Array([cidfont]))
+    if with_tounicode:
+        entries = "".join("<%04X> <%04X>\n" % (gid[c], ord(c)) for c in set(text))
+        cmap_txt = (
+            "/CIDInit /ProcSet findresource begin 12 dict begin begincmap "
+            "/CIDSystemInfo <</Registry(Adobe)/Ordering(UCS)/Supplement 0>> def "
+            "/CMapName /Adobe-Identity-UCS def /CMapType 2 def "
+            "1 begincodespacerange <0000> <FFFF> endcodespacerange "
+            "%d beginbfchar %s endbfchar endcmap "
+            "CMapName currentdict /CMap defineresource pop end end"
+            % (len(set(text)), entries))
+        d["ToUnicode"] = pdf.make_stream(cmap_txt.encode("latin-1"))
+    page.Resources = Dictionary(Font=Dictionary(F1=pdf.make_indirect(Dictionary(**d))))
+    hexcodes = "".join("%04X" % gid[c] for c in text)
+    page.Contents = pdf.make_stream(
+        ("BT /F1 26 Tf 20 50 Td <%s> Tj ET" % hexcodes).encode("latin-1"))
+    return _save_det(pdf)
+
+
+def gen_cid():
+    """CID Type0 Identity-H CON ToUnicode -> outlineable por unicode."""
+    return _build_cid("CID Type0 Identity 123", with_tounicode=True)
+
+
+def gen_cid_no_unicode():
+    """CID Type0 Identity-H SIN ToUnicode -> caso duro, self-check -> fallback."""
+    return _build_cid("CID sin unicode 456", with_tounicode=False)
+
+
 # nombre -> generador
 GENERATORS = {
     "latino_ttf.pdf": gen_latino_ttf,
@@ -376,6 +445,8 @@ GENERATORS = {
     "no_embebida.pdf": gen_no_embebida,
     "type3.pdf": gen_type3,
     "remapped.pdf": gen_remapped,
+    "cid.pdf": gen_cid,
+    "cid_no_unicode.pdf": gen_cid_no_unicode,
 }
 
 

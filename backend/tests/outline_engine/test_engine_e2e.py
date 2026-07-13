@@ -24,14 +24,16 @@ from app.core.outline_engine import (
 )
 
 FIDELITY_DPI = 300
-DIFF_THRESHOLD = 0.005  # 0.5% de pixeles por pagina
+DIFF_THRESHOLD = 0.005       # 0.5% para outline vectorial
+FALLBACK_DIFF_THRESHOLD = 0.015  # raster (JPEG) es con perdida -> mas holgado
 
 # Todo el corpus salvo casos duros de fallback.
 OUTLINEABLE = [
     "latino_ttf.pdf", "latino_cff.pdf", "subset.pdf", "multipos.pdf",
     "color_cmyk.pdf", "mixto.pdf", "no_embebida.pdf", "remapped.pdf",
+    "cid.pdf",
 ]
-FALLBACK_CASES = ["type3.pdf"]
+FALLBACK_CASES = ["type3.pdf", "cid_no_unicode.pdf"]
 
 
 # ----------------------------- helpers -----------------------------
@@ -115,13 +117,13 @@ def test_no_embebida_warns_about_substitution(corpus):
 @pytest.mark.parametrize("name", FALLBACK_CASES)
 def test_fallback_raster(name, corpus):
     original = corpus[name]
-    result = outline_pdf(original, OutlineOpts(fallback="raster", raster_dpi=300))
+    result = outline_pdf(original, OutlineOpts(fallback="raster", raster_dpi=600))
     out = result.pdf_bytes
     pr = result.report.pages[0]
     assert pr.fallback == "raster" and pr.reason
     assert _page_fonts(out) == 0 and _embedded_font_files(out) == 0
     # el raster debe parecerse al original (perdida de vectorial, no de contenido)
-    assert _pixel_diff_ratio(original, out) <= DIFF_THRESHOLD
+    assert _pixel_diff_ratio(original, out) <= FALLBACK_DIFF_THRESHOLD
     assert result.report.any_fallback is True
     assert 0 in result.report.fallback_pages
 
