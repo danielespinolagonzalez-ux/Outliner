@@ -7,6 +7,7 @@ vectoriales, para reemplazar el uso de **Ghostscript (AGPL-3.0)** en el módulo
 
 - Plan por fases: [`docs/PLAN_MOTOR_OUTLINER.md`](docs/PLAN_MOTOR_OUTLINER.md)
 - Contexto del proyecto: [`docs/PROYECTO.md`](docs/PROYECTO.md)
+- **Integración en PrintHub**: [`docs/INTEGRACION_PRINTHUB.md`](docs/INTEGRACION_PRINTHUB.md) (handoff listo para Claude Code)
 
 ## Estado: motor completo (Fases 0-4) — en verde
 
@@ -14,7 +15,7 @@ vectoriales, para reemplazar el uso de **Ghostscript (AGPL-3.0)** en el módulo
 - **API pública**: `outline_pdf(pdf_bytes|path, OutlineOpts()) -> OutlineResult(pdf_bytes, report)`.
 - Fidelidad **~0% a 300 dpi** en todo el corpus outlineable, **cero fuentes
   incrustadas**, texto no extraíble. Casos duros → **fallback raster** con report.
-- **91 tests** en `backend/tests/outline_engine/`.
+- **96 tests** en `backend/tests/outline_engine/` (incluye la auditoría profunda).
 
 Uso:
 
