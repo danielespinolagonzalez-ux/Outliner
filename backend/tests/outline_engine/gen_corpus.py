@@ -377,12 +377,13 @@ def _build_cid(text, with_tounicode):
     opts = Options()
     opts.notdef_outline = True
     opts.glyph_names = True
+    chars = sorted(set(text))  # orden ESTABLE entre procesos (set() no lo es)
     subsetter = Subsetter(options=opts)
-    subsetter.populate(unicodes=[ord(c) for c in set(text)])
+    subsetter.populate(unicodes=[ord(c) for c in chars])
     subsetter.subset(f)
     cmap = f.getBestCmap()
     scale = 1000.0 / upm
-    gid = {c: (f.getGlyphID(cmap[ord(c)]) if ord(c) in cmap else 0) for c in set(text)}
+    gid = {c: (f.getGlyphID(cmap[ord(c)]) if ord(c) in cmap else 0) for c in chars}
     buf = io.BytesIO()
     f.save(buf)
     program = buf.getvalue()
@@ -407,7 +408,7 @@ def _build_cid(text, with_tounicode):
     d = dict(Type=Name("/Font"), Subtype=Name("/Type0"), BaseFont=Name("/DejaVuSans"),
              Encoding=Name("/Identity-H"), DescendantFonts=Array([cidfont]))
     if with_tounicode:
-        entries = "".join("<%04X> <%04X>\n" % (gid[c], ord(c)) for c in set(text))
+        entries = "".join("<%04X> <%04X>\n" % (gid[c], ord(c)) for c in chars)
         cmap_txt = (
             "/CIDInit /ProcSet findresource begin 12 dict begin begincmap "
             "/CIDSystemInfo <</Registry(Adobe)/Ordering(UCS)/Supplement 0>> def "
@@ -415,7 +416,7 @@ def _build_cid(text, with_tounicode):
             "1 begincodespacerange <0000> <FFFF> endcodespacerange "
             "%d beginbfchar %s endbfchar endcmap "
             "CMapName currentdict /CMap defineresource pop end end"
-            % (len(set(text)), entries))
+            % (len(chars), entries))
         d["ToUnicode"] = pdf.make_stream(cmap_txt.encode("latin-1"))
     page.Resources = Dictionary(Font=Dictionary(F1=pdf.make_indirect(Dictionary(**d))))
     hexcodes = "".join("%04X" % gid[c] for c in text)
